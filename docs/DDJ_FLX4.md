@@ -10,8 +10,9 @@ is connected over USB.
 1. Connect the FLX4's computer/device USB-C port directly to the computer.
 2. Close rekordbox, Serato, and other software that may already own its MIDI ports.
 3. Launch `~/Applications/SetMix.app` or run `scripts/setmix-app`.
-4. Set **DDJ-FLX4** as the macOS sound output. This sends the SetMix master to
-   FLX4 USB channels 1/2 and the RCA MASTER OUT. Native cue monitoring uses USB
+4. Open SetMix's hardware check and click **ROUTE MASTER TO DDJ-FLX4**. This
+   selects the native CoreAudio device and sends the SetMix master to FLX4 USB
+   channels 1/2 and the RCA MASTER OUT. Native cue monitoring uses USB
    channels 3/4 and the FLX4 headphones socket. SetMix detects MIDI and audio
    ports automatically, including when the controller is plugged in after launch.
 
@@ -19,7 +20,8 @@ is connected over USB.
 
 Click the **DDJ-FLX4** status button in the SetMix desktop app. The hardware-check
 panel verifies native MIDI, the four-channel CoreAudio device, and whether macOS
-currently routes system audio to the FLX4. Before playing a track:
+currently routes system audio to the FLX4. Routing changes the system-wide macOS
+output, so SetMix only does it when the route button is clicked. Before playing a track:
 
 1. Turn MASTER LEVEL and HEADPHONES LEVEL down, then raise them slightly.
 2. Send the quiet **USB 1/2** test tone. It should be heard only through the RCA

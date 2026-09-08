@@ -102,6 +102,15 @@ class DesktopBridge:
     def test_audio_route(self, route: str) -> dict[str, Any]:
         return self._cue.test_route(str(route))
 
+    def route_master_to_flx4(self) -> dict[str, Any]:
+        """Make the FLX4 the macOS output used by the embedded player."""
+        try:
+            from .coreaudio import CoreAudioRouter
+
+            return CoreAudioRouter().route_to_flx4()
+        except Exception as error:
+            return {"ok": False, "error": str(error)}
+
     def hardware_diagnostics(self) -> dict[str, Any]:
         midi = self.list_midi_devices()
         audio = self.list_audio_outputs()

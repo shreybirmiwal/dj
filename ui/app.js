@@ -764,8 +764,10 @@ async function refreshHardwareCheck({ connect = false } = {}) {
       "Route",
       audio.masterRouted ? "pass" : "warn",
       audio.masterRouted ? "FLX4 DEFAULT" : "SET OUTPUT",
-      audio.masterRouted ? "Continuous master audio will reach USB 1/2 and the RCA outputs." : `macOS default: ${audio.defaultOutput || "unknown"} · select DDJ-FLX4 in Sound settings.`,
+      audio.masterRouted ? "Continuous master audio will reach USB 1/2 and the RCA outputs." : `macOS default: ${audio.defaultOutput || "unknown"} · use ROUTE MASTER below.`,
     );
+    $("#routeMasterOutput").disabled = !audio.available || audio.masterRouted;
+    $("#routeMasterOutput").textContent = audio.masterRouted ? "MASTER ROUTED TO DDJ-FLX4" : "ROUTE MASTER TO DDJ-FLX4";
     $("#testMasterRoute").disabled = !audio.available;
     $("#testPhonesRoute").disabled = !audio.available;
     $("#hwMessageCount").textContent = `${midi.messageCount || 0} MIDI messages received${midi.lastMessage ? ` · ${midi.lastMessage.join(" ")}` : ""}`;
@@ -773,6 +775,25 @@ async function refreshHardwareCheck({ connect = false } = {}) {
     setHardwareCheckRow("Midi", "fail", "BRIDGE ERROR", error.message);
     console.error(error);
   }
+}
+
+async function routeMasterOutput() {
+  const api = nativeDesktopApi();
+  const resultNode = $("#masterTestResult");
+  if (!api?.route_master_to_flx4) {
+    resultNode.className = "fail";
+    resultNode.textContent = "Native macOS app required";
+    return;
+  }
+  $("#routeMasterOutput").disabled = true;
+  resultNode.className = "";
+  resultNode.textContent = "Switching the macOS output to DDJ-FLX4…";
+  const result = await api.route_master_to_flx4();
+  resultNode.className = result.ok ? "pass" : "fail";
+  resultNode.textContent = result.ok
+    ? `${result.device} · ${result.channels}`
+    : (result.error || "Could not change the audio route");
+  await refreshHardwareCheck();
 }
 
 function openHardwareCheck() {
@@ -1556,6 +1577,7 @@ $("#connectController").addEventListener("click", openHardwareCheck);
 $("#closeHardwareCheck").addEventListener("click", closeHardwareCheck);
 $("#finishHardwareCheck").addEventListener("click", closeHardwareCheck);
 $("#refreshHardwareCheck").addEventListener("click", () => refreshHardwareCheck({ connect: true }));
+$("#routeMasterOutput").addEventListener("click", routeMasterOutput);
 $("#testMasterRoute").addEventListener("click", () => runHardwareTone("master"));
 $("#testPhonesRoute").addEventListener("click", () => runHardwareTone("phones"));
 $("#audioOutput").addEventListener("change", event => selectAudioOutput(event.target.value));

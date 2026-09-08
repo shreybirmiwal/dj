@@ -122,9 +122,15 @@ def test_native_bridge_reports_missing_controller(tmp_path: Path):
     assert "DDJ-FLX4 not detected" in result["error"]
 
 
-def test_native_bridge_exposes_separate_headphone_cue(tmp_path: Path):
+def test_native_bridge_exposes_separate_headphone_cue(tmp_path: Path, monkeypatch):
     cue = FakeCueEngine()
     bridge = DesktopBridge(tmp_path, mido_module=FakeMidi(), cue_engine=cue)
+
+    class FakeRouter:
+        def route_to_flx4(self):
+            return {"ok": True, "device": "DDJ-FLX4"}
+
+    monkeypatch.setattr("setmix.coreaudio.CoreAudioRouter", FakeRouter)
 
     assert bridge.list_audio_outputs()["available"] is True
     assert bridge.start_headphone_cue("track-1", 15.0, 0.6)["ok"] is True
@@ -132,6 +138,7 @@ def test_native_bridge_exposes_separate_headphone_cue(tmp_path: Path):
     assert bridge.set_headphone_level(0.25) == {"ok": True, "level": 0.25}
     assert bridge.stop_headphone_cue() == {"ok": True, "active": False}
     assert bridge.test_audio_route("phones")["channels"] == "3/4"
+    assert bridge.route_master_to_flx4() == {"ok": True, "device": "DDJ-FLX4"}
     bridge.shutdown()
     assert cue.shutdown_called is True
 
