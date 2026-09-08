@@ -24,6 +24,14 @@ const state = {
   mixJob: null,
   preparedHandoff: null,
   activeHandoff: null,
+  loop: { beats: 4, enabled: false, start: 0, end: 0 },
+  mixer: {
+    manual: false, crossfader: 0.5, master: 1,
+    trimA: 0.82, trimB: 0.82, faderA: 1, faderB: 1,
+    highA: 0.5, highB: 0.5, midA: 0.5, midB: 0.5,
+    lowA: 0.5, lowB: 0.5, filterA: 0.5, filterB: 0.5,
+  },
+  controller: { connected: false, name: null, messages: 0 },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -33,11 +41,88 @@ let currentAudio = audioPrimary;
 let transitioning = false;
 let joiningHandoff = false;
 let mixRequestGeneration = 0;
+let audioGraph = null;
+let midiAccess = null;
+let midiOutput = null;
+const automationGains = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
+const midiMsb = new Map();
 const JOIN_FADE_SECONDS = 0.35;
 const formatTime = (seconds) => {
   const value = Math.max(0, Math.floor(seconds));
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 };
+
+const formatDeckTime = (seconds) => {
+  const value = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(value / 60);
+  const wholeSeconds = Math.floor(value % 60);
+  const milliseconds = Math.floor((value % 1) * 1000);
+  return `${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0")}`;
+};
+
+function ensureAudioGraph() {
+  if (audioGraph || !(window.AudioContext || window.webkitAudioContext)) return audioGraph;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  const context = new AudioContextClass();
+  const master = context.createGain();
+  master.connect(context.destination);
+  const createChannel = (audio) => {
+    const source = context.createMediaElementSource(audio);
+    const highpass = context.createBiquadFilter(); highpass.type = "highpass"; highpass.frequency.value = 20;
+    const low = context.createBiquadFilter(); low.type = "lowshelf"; low.frequency.value = 180;
+    const mid = context.createBiquadFilter(); mid.type = "peaking"; mid.frequency.value = 1200; mid.Q.value = 0.8;
+    const high = context.createBiquadFilter(); high.type = "highshelf"; high.frequency.value = 6000;
+    const lowpass = context.createBiquadFilter(); lowpass.type = "lowpass"; lowpass.frequency.value = 20000;
+    const gain = context.createGain();
+    source.connect(highpass).connect(low).connect(mid).connect(high).connect(lowpass).connect(gain).connect(master);
+    return { audio, highpass, low, mid, high, lowpass, gain };
+  };
+  audioGraph = { context, master, channels: new Map([[audioPrimary, createChannel(audioPrimary)], [audioSecondary, createChannel(audioSecondary)]]) };
+  applyMixer();
+  return audioGraph;
+}
+
+function eqGain(value) {
+  return value < 0.5 ? (value - 0.5) * 36 : (value - 0.5) * 12;
+}
+
+function setAutomationGain(audio, value) {
+  automationGains.set(audio, Math.max(0, Math.min(1, value)));
+  applyMixer();
+}
+
+function applyMixer() {
+  const mix = state.mixer;
+  const active = currentAudio;
+  const standby = currentAudio === audioPrimary ? audioSecondary : audioPrimary;
+  const crossA = mix.manual ? Math.min(1, Math.SQRT2 * Math.cos(mix.crossfader * Math.PI / 2)) : 1;
+  const crossB = mix.manual ? Math.min(1, Math.SQRT2 * Math.sin(mix.crossfader * Math.PI / 2)) : 1;
+  const update = (audio, channelName, cross) => {
+    const channel = audioGraph?.channels.get(audio);
+    const suffix = channelName;
+    const auto = automationGains.get(audio) ?? 1;
+    const fader = mix.manual ? mix[`fader${suffix}`] : 1;
+    const trim = Math.min(1.4, mix[`trim${suffix}`] / 0.82);
+    const finalGain = auto * cross * fader * trim * mix.master;
+    if (!channel) {
+      audio.volume = Math.max(0, Math.min(1, finalGain));
+      return;
+    }
+    const now = audioGraph.context.currentTime;
+    channel.gain.gain.setTargetAtTime(finalGain, now, 0.012);
+    channel.low.gain.setTargetAtTime(eqGain(mix[`low${suffix}`]), now, 0.02);
+    channel.mid.gain.setTargetAtTime(eqGain(mix[`mid${suffix}`]), now, 0.02);
+    channel.high.gain.setTargetAtTime(eqGain(mix[`high${suffix}`]), now, 0.02);
+    const color = mix[`filter${suffix}`];
+    channel.highpass.frequency.setTargetAtTime(color < 0.5 ? 20 + (0.5 - color) * 3600 : 20, now, 0.02);
+    channel.lowpass.frequency.setTargetAtTime(color > 0.5 ? 20000 - (color - 0.5) * 36000 : 20000, now, 0.02);
+  };
+  update(active, "A", crossA);
+  update(standby, "B", crossB);
+  if (audioGraph) audioGraph.master.gain.setTargetAtTime(1, audioGraph.context.currentTime, 0.015);
+  $("#mixerMode").textContent = mix.manual ? "MANUAL HARDWARE OVERRIDE" : "AUTOMATION OWNS MIX";
+  $("#mixerMode").parentElement.classList.toggle("manual", mix.manual);
+}
 
 function makeWaveform() {
   const waveform = $("#waveform");
@@ -52,6 +137,108 @@ function makeWaveform() {
     waveform.appendChild(bar);
   }
   updateProgress();
+}
+
+function waveformSeed(track) {
+  return [...`${track?.id || "deck"}${track?.title || ""}`].reduce((value, character) => (value * 31 + character.charCodeAt(0)) >>> 0, 2166136261);
+}
+
+function drawTechnicalWaveform(canvas, track, progress, palette) {
+  if (!canvas || !track) return;
+  const context = canvas.getContext("2d");
+  const { width, height } = canvas;
+  const center = height / 2;
+  const seed = waveformSeed(track);
+  context.clearRect(0, 0, width, height);
+  context.fillStyle = "#080a0d";
+  context.fillRect(0, 0, width, height);
+  const bars = 260;
+  const barWidth = width / bars;
+  for (let index = 0; index < bars; index += 1) {
+    const position = index / (bars - 1);
+    const pseudo = Math.abs(Math.sin(index * 0.217 + seed * 0.0001) * Math.cos(index * 0.071 + seed * 0.00003));
+    const phrase = 0.48 + 0.52 * Math.abs(Math.sin(index * 0.031 + seed));
+    const amplitude = 10 + pseudo * phrase * center * 0.88;
+    const played = position <= progress;
+    const gradient = context.createLinearGradient(0, center - amplitude, 0, center + amplitude);
+    gradient.addColorStop(0, played ? palette[0] : "#25343a");
+    gradient.addColorStop(0.45, played ? palette[1] : "#2b3b42");
+    gradient.addColorStop(0.55, played ? palette[2] : "#302e3b");
+    gradient.addColorStop(1, played ? palette[0] : "#25343a");
+    context.fillStyle = gradient;
+    context.fillRect(index * barWidth, center - amplitude, Math.max(1, barWidth - 1), amplitude * 2);
+  }
+  context.fillStyle = "rgba(255,255,255,.08)";
+  context.fillRect(0, center, width, 1);
+}
+
+function currentMixResult() {
+  return state.preparedHandoff?.result || state.activeHandoff?.result || null;
+}
+
+function updatePerformanceConsole() {
+  const current = state.current;
+  const next = state.queued || state.suggestion;
+  if (!current || !next) return;
+  $("#deckATitle").textContent = current.title;
+  $("#deckAArtist").textContent = current.artist;
+  $("#deckAKey").textContent = current.camelot || current.key || "—";
+  $("#deckABpm").textContent = current.bpm ? Number(current.bpm).toFixed(1) : "—";
+  $("#deckATime").textContent = formatDeckTime(state.elapsed);
+  $("#deckARemaining").textContent = `-${formatDeckTime((current.length || 0) - state.elapsed)}`;
+  const beat = current.bpm ? Math.floor(state.elapsed / (60 / current.bpm)) : 0;
+  $("#deckAPhrase").textContent = `PHRASE ${String(Math.floor(beat / 32) + 1).padStart(2, "0")} / BAR ${Math.floor((beat % 32) / 4) + 1}.${(beat % 4) + 1}`;
+  const progress = current.length ? Math.max(0, Math.min(1, state.elapsed / current.length)) : 0;
+  drawTechnicalWaveform($("#deckAWave"), current, progress, ["#2a9ac1", "#55d8ff", "#9974d1"]);
+  $(".deck-a .playhead").style.left = `${progress * 100}%`;
+  $("#deckABeatgrid").style.setProperty("--deck-progress", `${progress * 100}%`);
+
+  $("#deckBTitle").textContent = next.title;
+  $("#deckBArtist").textContent = next.artist;
+  $("#deckBKey").textContent = next.camelot || next.key || "—";
+  $("#deckBBpm").textContent = next.bpm ? Number(next.bpm).toFixed(1) : "—";
+  $("#deckBLength").textContent = `-${formatDeckTime(next.length || 0)}`;
+  const delta = current.bpm && next.bpm ? ((state.masterBpm || current.bpm) / next.bpm - 1) * 100 : 0;
+  $("#deckBTempoDelta").textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`;
+  drawTechnicalWaveform($("#deckBWave"), next, 0, ["#73519f", "#ad78e1", "#c785b9"]);
+
+  const job = state.mixJob;
+  const result = currentMixResult();
+  const progressValue = job?.progress || (result ? 100 : 0);
+  $("#renderProgressBar").style.width = `${progressValue}%`;
+  $("#renderProgressText").textContent = job ? `${(job.stage || "queued").toUpperCase()} / ${progressValue}%` : result ? "HANDOFF ARMED / CACHE READY" : "ENGINE IDLE";
+  $("#deckBState").textContent = job ? `${(job.stage || "queued").toUpperCase()} / ${progressValue}%` : result ? "READY / QUANTIZED" : "STANDBY / ANALYSIS";
+  const stages = ["analysis", "vocals", "intelligence", "planning", "rendering"];
+  const stageIndex = job ? Math.max(0, stages.indexOf(job.stage)) : result ? stages.length : -1;
+  $("#pipelineStages").querySelectorAll("span").forEach((node, index) => {
+    node.classList.toggle("active", index === stageIndex);
+    node.classList.toggle("done", index < stageIndex || Boolean(result));
+  });
+  $("#pipelineStages").querySelectorAll("i").forEach((node, index) => node.classList.toggle("done", index < stageIndex || Boolean(result)));
+  $("#aiTechnique").textContent = (result?.technique || job?.options?.technique || "stem_phrase").toUpperCase();
+  $("#aiConfidence").textContent = result?.score == null ? "--%" : `${Math.round(Number(result.score) * (Number(result.score) <= 1 ? 100 : 1))}%`;
+  $("#aiSections").textContent = result ? `${result.fromSection || "phrase"} → ${result.toSection || "phrase"}`.toUpperCase() : "-- → --";
+  const vocalOverlap = result?.transition?.vocal_overlap;
+  $("#aiVocalRisk").textContent = vocalOverlap == null ? "--" : vocalOverlap < 0.15 ? "LOW" : vocalOverlap < 0.4 ? "MED" : "CONTROLLED";
+  $("#masterClock").textContent = formatDeckTime(state.elapsed);
+  updateHotCuePads();
+}
+
+function hotCueStorageKey() {
+  return `setmix:hotcues:${state.current?.id || "none"}`;
+}
+
+function readHotCues() {
+  try { return JSON.parse(localStorage.getItem(hotCueStorageKey()) || "[]"); } catch { return []; }
+}
+
+function updateHotCuePads() {
+  const cues = readHotCues();
+  $("#hotCuePads").querySelectorAll("[data-hotcue]").forEach((button) => {
+    const position = cues[Number(button.dataset.hotcue)];
+    button.classList.toggle("set", Number.isFinite(position));
+    button.querySelector("span").textContent = Number.isFinite(position) ? formatTime(position) : "HOT CUE";
+  });
 }
 
 function updateProgress() {
@@ -93,6 +280,7 @@ function updateProgress() {
     $("#transitionStatus").textContent = "Smart transition available";
     $("#transitionDetail").textContent = "Choose a track from the catalog";
   }
+  updatePerformanceConsole();
 }
 
 function energyBars(level, mini = false) {
@@ -185,8 +373,11 @@ function loadAudio(track, audio = currentAudio) {
 function setPlaybackState(playing, label) {
   state.playing = playing;
   $("#playbackToggle").classList.toggle("playing", playing);
+  $("#deckAPlay").classList.toggle("playing", playing);
+  $("#deckAPlay .transport-icon").textContent = playing ? "Ⅱ" : "▶";
   $("#playbackToggle").setAttribute("aria-label", playing ? "Pause continuous mix" : "Play continuous mix");
   $("#outputStatus").innerHTML = `<i></i> ${label}`;
+  if (midiOutput) midiOutput.send([0x90, 0x0b, playing ? 0x7f : 0]);
 }
 
 function waitForMetadata(audio) {
@@ -205,6 +396,8 @@ async function togglePlayback() {
     return;
   }
   try {
+    ensureAudioGraph();
+    if (audioGraph?.context.state === "suspended") await audioGraph.context.resume();
     if (!currentAudio.src) loadAudio(state.current);
     await currentAudio.play();
     setPlaybackState(true, state.activeHandoff ? "Playing the rendered smart mix" : "Streaming while the full mix prepares");
@@ -329,29 +522,29 @@ async function maybeJoinPreparedHandoff() {
     incoming.load();
     await waitForMetadata(incoming);
     incoming.currentTime = Math.max(0, stretchedPosition - result.handoff_start);
-    incoming.volume = 0;
+    setAutomationGain(incoming, 0);
     await incoming.play();
     setPlaybackState(true, `Full smart mix ready for ${prepared.nextTrack.title}`);
     const started = performance.now();
     const fade = (now) => {
       if (!state.playing) {
-        outgoing.volume = 1;
+        setAutomationGain(outgoing, 1);
         incoming.pause();
-        incoming.volume = 1;
+        setAutomationGain(incoming, 1);
         joiningHandoff = false;
         return;
       }
       const position = Math.min(1, (now - started) / (JOIN_FADE_SECONDS * 1000));
-      outgoing.volume = Math.cos(position * Math.PI / 2);
-      incoming.volume = Math.sin(position * Math.PI / 2);
+      setAutomationGain(outgoing, Math.cos(position * Math.PI / 2));
+      setAutomationGain(incoming, Math.sin(position * Math.PI / 2));
       if (position < 1) {
         requestAnimationFrame(fade);
         return;
       }
       outgoing.pause();
-      outgoing.volume = 1;
-      incoming.volume = 1;
       currentAudio = incoming;
+      setAutomationGain(outgoing, 0);
+      setAutomationGain(incoming, 1);
       state.activeHandoff = { ...prepared, promoted: false };
       state.preparedHandoff = null;
       joiningHandoff = false;
@@ -362,7 +555,7 @@ async function maybeJoinPreparedHandoff() {
   } catch (error) {
     joiningHandoff = false;
     incoming.pause();
-    incoming.volume = 1;
+    setAutomationGain(incoming, 1);
     setPlaybackState(state.playing, "Could not join the prepared mix");
     console.error(error);
   }
@@ -387,6 +580,8 @@ async function playNextImmediately() {
   if (!next) return;
   currentAudio.pause();
   currentAudio = currentAudio === audioPrimary ? audioSecondary : audioPrimary;
+  setAutomationGain(audioPrimary, currentAudio === audioPrimary ? 1 : 0);
+  setAutomationGain(audioSecondary, currentAudio === audioSecondary ? 1 : 0);
   renderCurrentTrack(next);
   state.activeHandoff = null;
   loadAudio(next);
@@ -396,6 +591,211 @@ async function playNextImmediately() {
     prepareSmartMix(state.suggestion);
   } catch (error) {
     setPlaybackState(false, "Could not play this format");
+  }
+}
+
+function setLoopEnabled(enabled, start = null, end = null) {
+  const beatSeconds = 60 / (state.masterBpm || state.current.bpm || 120);
+  if (start != null) state.loop.start = Math.max(0, start);
+  if (end != null) state.loop.end = Math.max(state.loop.start + 0.05, end);
+  if (!state.loop.end || state.loop.end <= state.loop.start) {
+    state.loop.start = Math.floor((currentAudio.currentTime || 0) / beatSeconds) * beatSeconds;
+    state.loop.end = state.loop.start + beatSeconds * state.loop.beats;
+  }
+  state.loop.enabled = enabled;
+  $("#loopToggle").classList.toggle("active", enabled);
+  $("#loopToggle").textContent = enabled ? "EXIT" : "LOOP";
+}
+
+function cueCurrentDeck() {
+  currentAudio.pause();
+  currentAudio.currentTime = 0;
+  state.elapsed = 0;
+  setPlaybackState(false, "Cue point ready");
+  updateProgress();
+}
+
+async function forceSmartMixNow() {
+  const prepared = state.preparedHandoff;
+  if (!prepared) {
+    await playNextImmediately();
+    return;
+  }
+  const outgoing = currentAudio;
+  const incoming = currentAudio === audioPrimary ? audioSecondary : audioPrimary;
+  const result = prepared.result;
+  outgoing.pause();
+  incoming.src = result.mediaUrl;
+  incoming.load();
+  await waitForMetadata(incoming);
+  incoming.currentTime = Math.max(0, result.transition_offset);
+  currentAudio = incoming;
+  setAutomationGain(outgoing, 0);
+  setAutomationGain(incoming, 1);
+  state.activeHandoff = { ...prepared, promoted: false };
+  state.preparedHandoff = null;
+  await incoming.play();
+  setPlaybackState(true, "Smart transition triggered from hardware");
+  updateProgress();
+}
+
+function cycleSuggestion(direction) {
+  if (!tracks.length) return;
+  const start = tracks.findIndex(track => track.id === state.suggestion.id);
+  let index = start;
+  for (let attempts = 0; attempts < tracks.length; attempts += 1) {
+    index = (index + direction + tracks.length) % tracks.length;
+    if (tracks[index].id !== state.current.id) {
+      setSuggestion(tracks[index]);
+      updatePerformanceConsole();
+      return;
+    }
+  }
+}
+
+function setMixerValue(name, value, { manual = false } = {}) {
+  if (!(name in state.mixer)) return;
+  state.mixer[name] = Math.max(0, Math.min(1, value));
+  if (manual) state.mixer.manual = true;
+  const input = $(`#${name}`);
+  if (input) {
+    input.value = state.mixer[name];
+    input.style.setProperty("--knob", state.mixer[name]);
+  }
+  applyMixer();
+}
+
+function mapMidi14(channel, controller, value) {
+  if (channel <= 1) {
+    const suffix = channel === 0 ? "A" : "B";
+    const mappings = { 0x04: `trim${suffix}`, 0x07: `high${suffix}`, 0x0b: `mid${suffix}`, 0x0f: `low${suffix}`, 0x13: `fader${suffix}` };
+    const filterController = channel === 0 ? 0x17 : 0x18;
+    const name = controller === filterController ? `filter${suffix}` : mappings[controller];
+    if (name) setMixerValue(name, value, { manual: name.startsWith("fader") });
+  } else if (channel === 6 && controller === 0x1f) {
+    setMixerValue("crossfader", value, { manual: true });
+  } else if (channel === 6 && controller === 0x08) {
+    setMixerValue("master", value);
+  }
+}
+
+function processMidiControl(channel, controller, value) {
+  if (channel === 6 && controller === 0x40) {
+    cycleSuggestion(value <= 0x3f ? Math.max(1, value) : -Math.max(1, 0x80 - value));
+    return;
+  }
+  if (channel <= 1 && [0x21, 0x22, 0x23].includes(controller)) {
+    if (channel === 0) {
+      const delta = value - 0x40;
+      currentAudio.currentTime = Math.max(0, Math.min(currentAudio.duration || Infinity, currentAudio.currentTime + delta * 0.035));
+    }
+    return;
+  }
+  if (controller < 0x20) {
+    midiMsb.set(`${channel}:${controller}`, value);
+    return;
+  }
+  const base = controller - 0x20;
+  const key = `${channel}:${base}`;
+  if (!midiMsb.has(key)) return;
+  const normalized = ((midiMsb.get(key) << 7) | value) / 16383;
+  mapMidi14(channel, base, normalized);
+}
+
+function processMidiNote(channel, note, velocity) {
+  if (!velocity) return;
+  if (channel <= 1) {
+    if (note === 0x0b) channel === 0 ? togglePlayback() : forceSmartMixNow();
+    if (note === 0x0c && channel === 0) cueCurrentDeck();
+    if (note === 0x58) {
+      $("#smartToggle").checked = !$("#smartToggle").checked;
+      $("#deckASync").classList.toggle("active", $("#smartToggle").checked);
+      $("#deckBSync").classList.toggle("active", $("#smartToggle").checked);
+      updateProgress();
+    }
+    if (note === 0x10 && channel === 0) {
+      state.loop.start = currentAudio.currentTime;
+      state.loop.end = 0;
+    }
+    if (note === 0x11 && channel === 0) setLoopEnabled(true, state.loop.start, currentAudio.currentTime);
+    if (note === 0x4d && channel === 0) setLoopEnabled(!state.loop.enabled);
+  }
+  if (channel === 6 && [0x41, 0x46, 0x47].includes(note)) queueTrack(state.suggestion);
+}
+
+function handleMidiMessage(event) {
+  const [status, data1, data2] = event.data;
+  const type = status & 0xf0;
+  const channel = status & 0x0f;
+  state.controller.messages += 1;
+  $("#hardwareStatus").textContent = `MIDI ACTIVE · ${state.controller.messages} RX`;
+  if (type === 0x90 || type === 0x80) processMidiNote(channel, data1, type === 0x80 ? 0 : data2);
+  if (type === 0xb0) processMidiControl(channel, data1, data2);
+}
+
+function attachMidiDevices() {
+  const candidates = [...midiAccess.inputs.values()].filter(port => /DDJ[- ]?FLX4|Pioneer DJ/i.test(port.name));
+  const outputs = [...midiAccess.outputs.values()].filter(port => /DDJ[- ]?FLX4|Pioneer DJ/i.test(port.name));
+  document.querySelectorAll(".hardware-button").forEach(button => button.classList.toggle("connected", candidates.length > 0));
+  if (!candidates.length) {
+    state.controller.connected = false;
+    $("#hardwareStatus").textContent = "NOT DETECTED · CHECK USB";
+    return;
+  }
+  candidates.forEach(port => { port.onmidimessage = handleMidiMessage; });
+  midiOutput = outputs[0] || null;
+  state.controller.connected = true;
+  state.controller.name = candidates[0].name;
+  $("#hardwareName").textContent = candidates[0].name;
+  $("#hardwareStatus").textContent = "MIDI CONNECTED · READY";
+  setPlaybackState(state.playing, state.playing ? "FLX4 control active" : "FLX4 ready");
+}
+
+async function refreshAudioOutputs() {
+  const select = $("#audioOutput");
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter(device => device.kind === "audiooutput");
+  select.innerHTML = '<option value="">SYSTEM DEFAULT</option>' + devices.map((device, index) => `<option value="${device.deviceId}">${device.label || `AUDIO OUTPUT ${index + 1}`}</option>`).join("");
+  const flx4 = devices.find(device => /DDJ[- ]?FLX4|Pioneer DJ/i.test(device.label));
+  if (flx4) select.value = flx4.deviceId;
+}
+
+async function connectController() {
+  const button = $("#connectController");
+  if (!navigator.requestMIDIAccess) {
+    button.classList.add("unsupported");
+    $("#hardwareStatus").textContent = "OPEN IN CHROME FOR WEB MIDI";
+    await refreshAudioOutputs();
+    return;
+  }
+  try {
+    $("#hardwareStatus").textContent = "REQUESTING MIDI ACCESS…";
+    midiAccess = await navigator.requestMIDIAccess({ sysex: false });
+    midiAccess.onstatechange = attachMidiDevices;
+    attachMidiDevices();
+    await refreshAudioOutputs();
+    $("#audioOutput").dispatchEvent(new Event("change"));
+  } catch (error) {
+    button.classList.add("unsupported");
+    $("#hardwareStatus").textContent = "MIDI PERMISSION DENIED";
+    console.error(error);
+  }
+}
+
+async function selectAudioOutput(deviceId) {
+  try {
+    const graph = ensureAudioGraph();
+    if (graph?.context.setSinkId) {
+      await graph.context.setSinkId(deviceId || "");
+    } else if (audioPrimary.setSinkId) {
+      await Promise.all([audioPrimary.setSinkId(deviceId), audioSecondary.setSinkId(deviceId)]);
+    } else {
+      throw new Error("Audio output selection requires Chrome 110+");
+    }
+    $("#hardwareStatus").textContent = deviceId ? "MIDI + USB AUDIO ROUTED" : "MIDI CONNECTED · SYSTEM AUDIO";
+  } catch (error) {
+    $("#hardwareStatus").textContent = "AUDIO ROUTE NEEDS CHROME";
+    console.error(error);
   }
 }
 
@@ -422,6 +822,58 @@ $("#filterRow").addEventListener("click", (event) => {
 $("#searchInput").addEventListener("input", (event) => { state.search = event.target.value; renderRows(); });
 $("#heartButton").addEventListener("click", (event) => event.currentTarget.classList.toggle("liked"));
 $("#playbackToggle").addEventListener("click", togglePlayback);
+$("#deckAPlay").addEventListener("click", togglePlayback);
+$("#deckACue").addEventListener("click", cueCurrentDeck);
+$("#deckBCue").addEventListener("click", () => queueTrack(state.suggestion, false));
+$("#deckBLoad").addEventListener("click", () => queueTrack(state.suggestion));
+$("#approveNext").addEventListener("click", () => queueTrack(state.suggestion));
+$("#rejectNext").addEventListener("click", () => cycleSuggestion(1));
+$("#forceMix").addEventListener("click", forceSmartMixNow);
+$("#connectController").addEventListener("click", connectController);
+$("#audioOutput").addEventListener("change", event => selectAudioOutput(event.target.value));
+$("#loopToggle").addEventListener("click", () => setLoopEnabled(!state.loop.enabled));
+document.querySelectorAll("[data-loop-change]").forEach(button => button.addEventListener("click", () => {
+  const sizes = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
+  const current = sizes.indexOf(state.loop.beats);
+  state.loop.beats = sizes[Math.max(0, Math.min(sizes.length - 1, current + Number(button.dataset.loopChange)))];
+  $("#loopSize").textContent = state.loop.beats;
+  if (state.loop.enabled) {
+    const beatSeconds = 60 / Math.max(1, Number(state.current?.bpm) || 120);
+    setLoopEnabled(true, state.loop.start, state.loop.start + beatSeconds * state.loop.beats);
+  }
+}));
+$("#hotCuePads").addEventListener("click", event => {
+  const button = event.target.closest("[data-hotcue]");
+  if (!button) return;
+  const index = Number(button.dataset.hotcue);
+  const cues = readHotCues();
+  if (event.altKey || event.shiftKey) {
+    cues[index] = null;
+  } else if (Number.isFinite(cues[index])) {
+    currentAudio.currentTime = Math.max(0, cues[index]);
+  } else {
+    cues[index] = currentAudio.currentTime || state.elapsed;
+  }
+  localStorage.setItem(hotCueStorageKey(), JSON.stringify(cues));
+  updateHotCuePads();
+});
+document.querySelectorAll(".stem-toggles button").forEach(button => button.addEventListener("click", () => button.classList.toggle("active")));
+document.querySelectorAll(".pro-mixer input[type=range]").forEach(input => {
+  input.style.setProperty("--knob", input.value);
+  input.addEventListener("input", () => setMixerValue(input.id, Number(input.value), { manual: input.id.startsWith("fader") || input.id === "crossfader" }));
+});
+document.querySelectorAll("[data-channel-cue]").forEach(button => button.addEventListener("click", () => button.classList.toggle("active")));
+$("#mixerMode").parentElement.addEventListener("click", () => {
+  state.mixer.manual = false;
+  applyMixer();
+});
+[$("#deckASync"), $("#deckBSync")].forEach(button => button.addEventListener("click", () => {
+  $("#smartToggle").checked = !$("#smartToggle").checked;
+  $("#deckASync").classList.toggle("active", $("#smartToggle").checked);
+  $("#deckBSync").classList.toggle("active", $("#smartToggle").checked);
+  if ($("#smartToggle").checked && !state.mixJob && !state.preparedHandoff) prepareSmartMix(state.queued || state.suggestion);
+  updateProgress();
+}));
 $("#smartToggle").addEventListener("change", () => {
   if ($("#smartToggle").checked && !state.mixJob && !state.preparedHandoff && !state.activeHandoff) {
     prepareSmartMix(state.queued || state.suggestion);
@@ -463,6 +915,9 @@ setInterval(() => {
   const seconds = state.sessionSeconds % 60;
   $("#sessionTime").textContent = [hours, minutes, seconds].map(v => String(v).padStart(2, "0")).join(":");
   if (!state.playing) return;
+  if (state.loop.enabled && currentAudio.currentTime >= state.loop.end) {
+    currentAudio.currentTime = state.loop.start;
+  }
   state.elapsed = logicalSourceSeconds();
   maybeJoinPreparedHandoff();
   const active = state.activeHandoff;

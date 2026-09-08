@@ -36,6 +36,11 @@ Analysis, stems, transcripts, stretched tracks, and finished pair handoffs are a
 cached, so repeated pairs become much faster. Override the library location with
 `--music-dir /path/to/music` or the `SETMIX_MUSIC_DIR` environment variable.
 
+The performance workspace includes two deck waveforms, phrase and beat counters,
+hot cues, beat loops, stem controls, channel EQ/filter/faders, a crossfader, and
+live AI pipeline telemetry. DDJ-FLX4 USB audio and MIDI setup is documented in
+[`docs/DDJ_FLX4.md`](docs/DDJ_FLX4.md).
+
 ## Setup
 
 ```sh

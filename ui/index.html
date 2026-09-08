@@ -7,7 +7,7 @@
     <title>SetMix — continuous intelligent DJ</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -59,8 +59,10 @@
       <main>
         <header class="topbar">
           <div class="mobile-brand">setmix</div>
+          <div class="system-readout"><span class="status-led"></span><b>ENGINE</b> 44.1 KHZ / 24 BIT <i>•</i> <b>BUFFER</b> 512</div>
           <div class="live-pill"><span></span> LIVE <b id="sessionTime">01:48:24</b></div>
           <div class="top-actions">
+            <button class="hardware-button" id="connectController"><span class="hardware-led"></span><span><b id="hardwareName">DDJ-FLX4</b><small id="hardwareStatus">CONNECT HARDWARE</small></span></button>
             <button class="icon-button" aria-label="Notifications">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
               <i></i>
@@ -70,6 +72,99 @@
         </header>
 
         <div class="content">
+          <section class="performance-console" aria-label="DJ performance workspace">
+            <div class="console-toolbar">
+              <div class="console-tabs"><button class="active">2 DECK</button><button>STEMS</button><button>SAMPLER</button></div>
+              <div class="console-meters">
+                <span><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><b>MASTER</b></span>
+                <strong id="masterClock">00:00.000</strong>
+              </div>
+              <label class="audio-route"><span>AUDIO OUT</span><select id="audioOutput"><option value="">SYSTEM DEFAULT</option></select></label>
+            </div>
+
+            <div class="deck-stage">
+              <article class="pro-deck deck-a" data-deck="A">
+                <div class="deck-header">
+                  <span class="deck-badge">A</span>
+                  <div><strong id="deckATitle">Loading track…</strong><small id="deckAArtist">—</small></div>
+                  <div class="deck-key"><small>KEY</small><b id="deckAKey">—</b></div>
+                  <div class="deck-bpm"><small>BPM</small><b id="deckABpm">—</b></div>
+                </div>
+                <div class="overview-wave"><canvas id="deckAWave" width="900" height="152"></canvas><span class="playhead"></span><i class="cue-marker" style="left:12%">1</i><i class="cue-marker amber" style="left:68%">MIX</i></div>
+                <div class="deck-time"><strong id="deckATime">00:00.000</strong><span id="deckARemaining">-00:00.000</span><b id="deckAPhrase">PHRASE 01 / BAR 1.1</b></div>
+                <div class="beat-grid" id="deckABeatgrid"></div>
+                <div class="deck-controls">
+                  <button class="transport cue-button" id="deckACue"><span>CUE</span><small>RETURN</small></button>
+                  <button class="transport play-button" id="deckAPlay"><span class="transport-icon">▶</span><small>PLAY</small></button>
+                  <button class="sync-button active" id="deckASync"><span>SYNC</span><small>MASTER</small></button>
+                  <div class="loop-control"><button data-loop-change="-1">−</button><strong id="loopSize">4</strong><small>BEAT LOOP</small><button data-loop-change="1">+</button><button id="loopToggle">LOOP</button></div>
+                </div>
+                <div class="performance-pads" id="hotCuePads">
+                  <button data-hotcue="0"><b>1</b><span>HOT CUE</span></button><button data-hotcue="1"><b>2</b><span>HOT CUE</span></button><button data-hotcue="2"><b>3</b><span>HOT CUE</span></button><button data-hotcue="3"><b>4</b><span>HOT CUE</span></button>
+                </div>
+              </article>
+
+              <section class="pro-mixer" aria-label="Mixer">
+                <div class="mixer-title"><span>2 CH MIXER</span><b>AI ASSIST</b></div>
+                <div class="mixer-channels">
+                  <div class="channel-strip" data-channel="A">
+                    <label class="knob-control">TRIM<input type="range" id="trimA" min="0" max="1" step=".01" value=".82" /></label>
+                    <label class="knob-control">HI<input type="range" id="highA" min="0" max="1" step=".01" value=".5" /></label>
+                    <label class="knob-control">MID<input type="range" id="midA" min="0" max="1" step=".01" value=".5" /></label>
+                    <label class="knob-control">LOW<input type="range" id="lowA" min="0" max="1" step=".01" value=".5" /></label>
+                    <label class="knob-control color">FILTER<input type="range" id="filterA" min="0" max="1" step=".01" value=".5" /></label>
+                    <div class="channel-meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                    <label class="line-fader"><input type="range" id="faderA" min="0" max="1" step=".01" value="1" /></label>
+                    <button class="channel-cue" data-channel-cue="A">CUE</button>
+                  </div>
+                  <div class="channel-strip" data-channel="B">
+                    <label class="knob-control">TRIM<input type="range" id="trimB" min="0" max="1" step=".01" value=".82" /></label>
+                    <label class="knob-control">HI<input type="range" id="highB" min="0" max="1" step=".01" value=".5" /></label>
+                    <label class="knob-control">MID<input type="range" id="midB" min="0" max="1" step=".01" value=".5" /></label>
+                    <label class="knob-control">LOW<input type="range" id="lowB" min="0" max="1" step=".01" value=".5" /></label>
+                    <label class="knob-control color">FILTER<input type="range" id="filterB" min="0" max="1" step=".01" value=".5" /></label>
+                    <div class="channel-meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                    <label class="line-fader"><input type="range" id="faderB" min="0" max="1" step=".01" value="1" /></label>
+                    <button class="channel-cue" data-channel-cue="B">CUE</button>
+                  </div>
+                </div>
+                <div class="crossfader-wrap"><span>A</span><input type="range" id="crossfader" min="0" max="1" step=".005" value=".5" /><span>B</span></div>
+                <div class="mixer-mode"><span class="mode-led"></span><b id="mixerMode">AUTOMATION OWNS MIX</b></div>
+              </section>
+
+              <article class="pro-deck deck-b" data-deck="B">
+                <div class="deck-header">
+                  <span class="deck-badge">B</span>
+                  <div><strong id="deckBTitle">Choose next track</strong><small id="deckBArtist">—</small></div>
+                  <div class="deck-key"><small>KEY</small><b id="deckBKey">—</b></div>
+                  <div class="deck-bpm"><small>BPM</small><b id="deckBBpm">—</b></div>
+                </div>
+                <div class="overview-wave preview"><canvas id="deckBWave" width="900" height="152"></canvas><span class="load-line"></span><i class="cue-marker violet" style="left:22%">IN</i><i class="cue-marker amber" style="left:57%">DROP</i></div>
+                <div class="deck-time"><strong id="deckBTime">--:--.---</strong><span id="deckBLength">-00:00.000</span><b id="deckBState">STANDBY / ANALYSIS</b></div>
+                <div class="beat-grid secondary" id="deckBBeatgrid"></div>
+                <div class="deck-controls">
+                  <button class="transport cue-button" id="deckBCue"><span>CUE</span><small>PREVIEW</small></button>
+                  <button class="transport load-button" id="deckBLoad"><span>LOAD</span><small>TO QUEUE</small></button>
+                  <button class="sync-button" id="deckBSync"><span>SYNC</span><small id="deckBTempoDelta">±0.0%</small></button>
+                  <div class="stem-toggles"><button class="active" data-stem="vocals">VOCAL</button><button class="active" data-stem="drums">DRUMS</button><button class="active" data-stem="bass">BASS</button><button class="active" data-stem="other">MUSIC</button></div>
+                </div>
+                <div class="performance-pads suggestion-pads">
+                  <button id="approveNext" class="approve"><b>✓</b><span>APPROVE</span></button><button id="rejectNext"><b>×</b><span>REJECT</span></button><button data-technique="stem_phrase"><b>S</b><span>STEM MIX</span></button><button id="forceMix"><b>↯</b><span>MIX NOW</span></button>
+                </div>
+              </article>
+            </div>
+
+            <div class="ai-rack">
+              <div class="ai-rack-title"><span class="ai-orb"></span><span><b>SETMIX INTELLIGENCE</b><small>PHRASE-AWARE AUTOPILOT</small></span></div>
+              <div class="pipeline" id="pipelineStages"><span class="active" data-stage="analysis">ANALYZE</span><i></i><span data-stage="vocals">STEMS</span><i></i><span data-stage="intelligence">WORDS</span><i></i><span data-stage="planning">PLAN</span><i></i><span data-stage="rendering">RENDER</span></div>
+              <div class="ai-stat"><small>TRANSITION</small><b id="aiTechnique">STEM_PHRASE</b></div>
+              <div class="ai-stat"><small>CONFIDENCE</small><b id="aiConfidence">--%</b></div>
+              <div class="ai-stat"><small>SECTION</small><b id="aiSections">-- → --</b></div>
+              <div class="ai-stat"><small>VOCAL RISK</small><b id="aiVocalRisk">--</b></div>
+              <div class="render-progress"><span><i id="renderProgressBar"></i></span><small id="renderProgressText">ENGINE IDLE</small></div>
+            </div>
+          </section>
+
           <section class="hero-grid">
             <article class="now-playing-panel">
               <div class="panel-heading">
