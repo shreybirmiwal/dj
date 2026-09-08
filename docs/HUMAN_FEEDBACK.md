@@ -214,11 +214,16 @@ them only with a listening reason and update this table.
 | Drop high overlap | 4 beats | Retains ambience and continuity | Dense vocals can still clash |
 | Drum drift correction | 4 eight-bar blocks, R² >= 0.90 | Applies warp only to reliable measured drift | Syncopated patterns can confuse correlation |
 | Track loudness target | Approximately -15 dB RMS analysis target | Reduces obvious song-to-song level changes | Local section energy still varies |
-| Output limiter | Approximately -1 dBFS ceiling | Prevents clipping | Limiting cannot repair a poor arrangement |
+| Long-transition solo space | 8 bars when the track permits | Prevents back-to-back transitions and cue rewinds | Very short tracks may have to mix again immediately |
+| Long-stem energy floor | 66% of interpolated 75th-percentile section RMS, max 3.5x lift | Supports unexpectedly sparse handoff centers without flattening the whole song | Still needs human listening for audible pumping or stem noise |
+| Output limiter | Approximately -1.5 dBFS ceiling | Leaves room for MP3 inter-sample overshoot | Limiting cannot repair a poor arrangement |
 
 ### Candidate score weights
 
-Current values in `setmix/intelligence.py`:
+Current default/impact values in `setmix/intelligence.py` are technique-aware.
+Long `stem_phrase` blends instead use 0.19 vocal safety, 0.15 word boundaries,
+0.24 transition energy floor, and zero drop-opportunity weight: a landmark that
+would justify an impact cut must not pull a gradual blend into two breakdowns.
 
 | Signal | Weight | Rationale |
 |---|---:|---|
@@ -237,6 +242,21 @@ Known scoring defect: word-boundary timestamps are evaluated using fixed stem
 handoff percentages. They must become **technique-specific event times**. For
 example, score the actual drop dominance event for `drop_cut`, and score the
 detected vocal-pocket entrance for the future instrumental-bed technique.
+
+### Ten-song randomized pop/EDM set
+- Render: `output/ten-song-random-2026-09-08/full-mix-v5.mp3`
+- Status: IMPROVED, NEEDS LISTENING
+- General rules tested:
+  - A track must never rewind to an earlier phrase after it has entered.
+  - Reserve eight solo bars between long handoffs when duration permits.
+  - Score the quietest point of gradual blends, not merely the difference
+    between their starting sections.
+  - Smoothly support sparse transition centers; do not normalize whole songs.
+- Objective QA:
+  - 24:35 duration, nine 16-bar four-stem transitions.
+  - Zero clipped samples, -0.67 dBFS decoded MP3 peak, -15.56 dBFS RMS.
+  - All transition loudness ranges below 8 dB; worst measured range 7.77 dB.
+- Human acceptance result: pending.
 
 ## Next implementation priorities
 

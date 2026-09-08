@@ -300,13 +300,19 @@ def analyze_intelligence(
     )
 
 
-def _candidate_indices(track: TrackAnalysis, *, incoming: bool) -> list[int]:
+def _candidate_indices(
+    track: TrackAnalysis,
+    *,
+    incoming: bool,
+    minimum_second: float = 0.0,
+) -> list[int]:
     required = track.transition_bars * 4
     aligned = range(track.phrase_offset, len(track.beat_times), 32)
     usable = [
         index
         for index in aligned
-        if index + required < len(track.beat_times)
+        if track.beat_times[index] >= minimum_second
+        and index + required < len(track.beat_times)
         and track.beat_times[index + required] <= track.active_end + 0.2
     ]
     # Incoming songs should still feel like songs rather than arbitrary excerpts.
@@ -468,6 +474,34 @@ def _early_energy_stability(
     return float(np.clip(1.0 - largest_rise, 0.0, 1.0))
 
 
+def _transition_energy_floor(
+    left: TrackIntelligence,
+    right: TrackIntelligence,
+    left_start: float,
+    right_start: float,
+    left_duration: float,
+    right_duration: float,
+) -> float:
+    """Estimate whether a long handoff has enough musical bed throughout.
+
+    Matching two equally quiet breakdowns looks good to a simple energy-
+    difference metric but produces exactly the dead center listeners dislike.
+    Sample the staged handoff and score its quietest point instead.
+    """
+    values: list[float] = []
+    for position in np.linspace(0.0, 1.0, 9):
+        left_section = left.section_at(left_start + position * left_duration)
+        right_section = right.section_at(right_start + position * right_duration)
+        left_energy = left_section.energy if left_section else 0.5
+        right_energy = right_section.energy if right_section else 0.5
+        # Approximate the four-stem schedule: outgoing ownership early,
+        # destination ownership late, and both instrumental beds in the middle.
+        outgoing_weight = float(np.cos(position * math.pi / 2.0) ** 2)
+        incoming_weight = float(np.sin(position * math.pi / 2.0) ** 2)
+        values.append(outgoing_weight * left_energy + incoming_weight * right_energy)
+    return float(np.clip(min(values), 0.0, 1.0))
+
+
 def rank_transition_candidates(
     left: TrackAnalysis,
     right: TrackAnalysis,
@@ -479,9 +513,14 @@ def rank_transition_candidates(
     target_bpm: float,
     technique: str = "auto",
     limit: int = 8,
+    minimum_from_cue: float = 0.0,
 ) -> list[TransitionCandidate]:
     """Generate phrase-aligned transition choices and return them best-first."""
-    left_candidates = _candidate_indices(left, incoming=False)
+    left_candidates = _candidate_indices(
+        left,
+        incoming=False,
+        minimum_second=minimum_from_cue,
+    )
     right_candidates = _candidate_indices(right, incoming=True)
     if not left_candidates or not right_candidates:
         return []
@@ -506,6 +545,14 @@ def rank_transition_candidates(
             early_energy_stability = _early_energy_stability(
                 right_intelligence,
                 right_start,
+                right_source_duration,
+            )
+            energy_floor = _transition_energy_floor(
+                left_intelligence,
+                right_intelligence,
+                left_start,
+                right_start,
+                left_source_duration,
                 right_source_duration,
             )
             overlap = _vocal_overlap(
@@ -543,24 +590,41 @@ def rank_transition_candidates(
                 "tempo_compatibility": tempo_score,
                 "playlist_position": position_score,
                 "early_energy_stability": early_energy_stability,
+                "transition_energy_floor": energy_floor,
                 "drop_opportunity": (
                     math.exp(-abs(drop_position - 0.52) / 0.22)
-                    if drop_position is not None
+                    if drop_position is not None and technique in {"auto", "varied", "drop_cut"}
                     else 0.0
                 ),
             }
-            weights = {
-                "vocal_safety": 0.16,
-                "word_boundaries": 0.14,
-                "section_compatibility": 0.13,
-                "energy_continuity": 0.08,
-                "beat_confidence": 0.08,
-                "harmonic_compatibility": 0.06,
-                "tempo_compatibility": 0.04,
-                "playlist_position": 0.06,
-                "early_energy_stability": 0.10,
-                "drop_opportunity": 0.15,
-            }
+            if technique == "stem_phrase":
+                weights = {
+                    "vocal_safety": 0.19,
+                    "word_boundaries": 0.15,
+                    "section_compatibility": 0.11,
+                    "energy_continuity": 0.06,
+                    "beat_confidence": 0.07,
+                    "harmonic_compatibility": 0.05,
+                    "tempo_compatibility": 0.03,
+                    "playlist_position": 0.03,
+                    "early_energy_stability": 0.07,
+                    "transition_energy_floor": 0.24,
+                    "drop_opportunity": 0.0,
+                }
+            else:
+                weights = {
+                    "vocal_safety": 0.14,
+                    "word_boundaries": 0.12,
+                    "section_compatibility": 0.11,
+                    "energy_continuity": 0.07,
+                    "beat_confidence": 0.07,
+                    "harmonic_compatibility": 0.05,
+                    "tempo_compatibility": 0.04,
+                    "playlist_position": 0.05,
+                    "early_energy_stability": 0.09,
+                    "transition_energy_floor": 0.11,
+                    "drop_opportunity": 0.15,
+                }
             score = sum(breakdown[name] * weight for name, weight in weights.items())
             chosen = _select_technique(
                 technique,

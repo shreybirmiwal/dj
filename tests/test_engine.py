@@ -130,6 +130,22 @@ def test_four_stem_transition_is_finite() -> None:
     assert float(np.max(np.abs(result))) < 1.0
 
 
+def test_four_stem_transition_lifts_an_unexpectedly_empty_center() -> None:
+    frames = 44100 * 8
+    time = np.arange(frames) / 44100.0
+    tone = np.column_stack((np.sin(time * 2 * np.pi * 110.0),) * 2).astype("float32")
+    left_envelope = np.where(np.arange(frames) < frames // 3, 0.12, 0.03).astype("float32")
+    right_envelope = np.where(np.arange(frames) > 2 * frames // 3, 0.12, 0.03).astype("float32")
+    left = {name: tone * left_envelope[:, None] * 0.25 for name in ("vocals", "drums", "bass", "other")}
+    right = {name: tone * right_envelope[:, None] * 0.25 for name in ("vocals", "drums", "bass", "other")}
+    result = mix_four_stem_transition(left, right, 1.0, 1.0)
+    center = result[frames * 3 // 8 : frames * 5 // 8]
+    edge = np.concatenate((result[: frames // 8], result[-frames // 8 :]))
+    center_db = 20.0 * np.log10(np.sqrt(np.mean(np.square(center))) + 1e-9)
+    edge_db = 20.0 * np.log10(np.sqrt(np.mean(np.square(edge))) + 1e-9)
+    assert center_db > edge_db - 12.0
+
+
 def test_drum_alignment_tracks_gradual_tempo_drift() -> None:
     sample_rate = 44100
     seconds = 64
@@ -205,6 +221,19 @@ def test_candidates_are_ranked_and_explain_their_scores() -> None:
     assert candidates[0].from_cue in left.beat_times[::32]
     assert candidates[0].to_cue in right.beat_times[::32]
 
+    later = rank_transition_candidates(
+        left,
+        right,
+        left_vocals,
+        right_vocals,
+        TrackIntelligence(left.path, [section], left_transcript),
+        TrackIntelligence(right.path, [section], right_transcript),
+        target_bpm=120.0,
+        minimum_from_cue=30.0,
+    )
+    assert later
+    assert all(candidate.from_cue >= 30.0 for candidate in later)
+
 
 def test_planner_prefers_intro_then_cut_on_incoming_drop() -> None:
     left = _intelligent_track("left.wav")
@@ -229,3 +258,30 @@ def test_planner_prefers_intro_then_cut_on_incoming_drop() -> None:
     assert candidates[0].to_cue == 16.0
     assert candidates[0].drop_position == 0.5
     assert candidates[0].score_breakdown["drop_opportunity"] > 0.9
+
+
+def test_long_stem_planner_avoids_two_quiet_breakdowns() -> None:
+    left = _intelligent_track("left.wav")
+    right = _intelligent_track("right.wav")
+    quiet = VocalMap("quiet", "test", 0.25, [], 0.0, 1.0)
+    left_sections = [
+        SectionSpan(0.0, 32.0, "breakdown", 0.08, 0.3, 0.2, 0.0, 0.9),
+        SectionSpan(32.0, 64.0, "drop", 0.90, 0.7, 0.9, 0.0, 0.9),
+    ]
+    right_sections = [
+        SectionSpan(0.0, 32.0, "breakdown", 0.06, 0.3, 0.2, 0.0, 0.9),
+        SectionSpan(32.0, 64.0, "drop", 0.92, 0.7, 0.9, 0.0, 0.9),
+    ]
+    candidates = rank_transition_candidates(
+        left,
+        right,
+        quiet,
+        quiet,
+        TrackIntelligence(left.path, left_sections, None),
+        TrackIntelligence(right.path, right_sections, None),
+        target_bpm=120.0,
+        technique="stem_phrase",
+    )
+    assert candidates
+    assert "transition_energy_floor" in candidates[0].score_breakdown
+    assert candidates[0].score_breakdown["drop_opportunity"] == 0.0

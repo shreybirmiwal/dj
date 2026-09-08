@@ -24,6 +24,7 @@ from .stems import VocalMap, choose_vocal_safe_cues, separate_stems, separate_vo
 SAMPLE_RATE = 44100
 CHANNELS = 2
 BLOCK_FRAMES = SAMPLE_RATE * 2
+LIMITER_FILTER = "alimiter=limit=0.841395:attack=5:release=80:level=false"
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,13 @@ def create_plan(
         vocal_overlap: float | None = None
         selected_candidate = None
         pair_candidates = []
+        # Once a track has entered through the previous transition, never
+        # rewind it to reach a highly scored earlier cue. Reserve eight bars
+        # of solo playback when the track is long enough.
+        minimum_left_source_cue = 0.0
+        if transition_index > 0:
+            solo_seconds = 8.0 * 4.0 * 60.0 / target
+            minimum_left_source_cue = (current_source + solo_seconds) * left_ratio
         if (
             vocal_maps
             and intelligence
@@ -163,6 +171,7 @@ def create_plan(
                 intelligence[right.path],
                 target_bpm=target,
                 technique=technique,
+                minimum_from_cue=minimum_left_source_cue,
             )
             if pair_candidates:
                 selected_candidate = pair_candidates[0]
@@ -176,6 +185,33 @@ def create_plan(
                 vocal_maps[left.path],
                 vocal_maps[right.path],
             )
+        if left_source_cue < minimum_left_source_cue:
+            required_beats = left.transition_bars * 4
+            later_phrases = [
+                left.beat_times[index]
+                for index in range(left.phrase_offset, len(left.beat_times), 32)
+                if left.beat_times[index] >= minimum_left_source_cue
+                and index + required_beats < len(left.beat_times)
+                and left.beat_times[index + required_beats] <= left.active_end + 0.2
+            ]
+            if later_phrases:
+                left_source_cue = later_phrases[0]
+            else:
+                # A short song may not fit both eight solo bars and the full
+                # transition. It may mix again immediately, but it must never
+                # replay already-consumed material.
+                consumed_source = current_source * left_ratio
+                no_rewind_phrases = [
+                    left.beat_times[index]
+                    for index in range(left.phrase_offset, len(left.beat_times), 32)
+                    if left.beat_times[index] >= consumed_source
+                    and index + required_beats < len(left.beat_times)
+                    and left.beat_times[index + required_beats] <= left.active_end + 0.2
+                ]
+                if no_rewind_phrases:
+                    left_source_cue = no_rewind_phrases[0]
+                else:
+                    left_source_cue = consumed_source
         left_local_bpm = _tempo_at(left, left_source_cue)
         right_local_bpm = _tempo_at(right, right_source_cue)
         duration = left.transition_bars * 4.0 * 60.0 / target
@@ -407,6 +443,59 @@ def _split_three(data: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 def _equal_power(position: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     angle = np.clip(position, 0.0, 1.0) * (math.pi / 2.0)
     return np.cos(angle)[:, None], np.sin(angle)[:, None]
+
+
+def _stabilize_transition_energy(
+    mixed: np.ndarray,
+    outgoing_reference: np.ndarray,
+    incoming_reference: np.ndarray,
+) -> np.ndarray:
+    """Lift only unexpectedly empty transition pockets with a smooth envelope."""
+    block_frames = SAMPLE_RATE // 2
+
+    def block_rms(signal: np.ndarray) -> np.ndarray:
+        return np.asarray(
+            [
+                float(np.sqrt(np.mean(np.square(signal[start : start + block_frames])) + 1e-12))
+                for start in range(0, len(signal), block_frames)
+            ],
+            dtype=np.float64,
+        )
+
+    mixed_rms = block_rms(mixed)
+    left_rms = block_rms(outgoing_reference)
+    right_rms = block_rms(incoming_reference)
+    if not len(mixed_rms):
+        return mixed
+    left_reference = float(np.percentile(left_rms, 75))
+    right_reference = float(np.percentile(right_rms, 75))
+    positions = (np.arange(len(mixed_rms), dtype=np.float64) + 0.5) / len(mixed_rms)
+    reference = (1.0 - positions) * left_reference + positions * right_reference
+    floor = 0.66 * reference
+    gains = np.clip(floor / np.maximum(mixed_rms, 1e-6), 1.0, 3.5)
+
+    # Prevent pumping: attack over two half-second blocks and release over four.
+    for index in range(1, len(gains)):
+        coefficient = 0.50 if gains[index] > gains[index - 1] else 0.25
+        gains[index] = gains[index - 1] + coefficient * (gains[index] - gains[index - 1])
+    for index in range(len(gains) - 2, -1, -1):
+        if gains[index] > gains[index + 1]:
+            gains[index] = gains[index + 1] + 0.35 * (gains[index] - gains[index + 1])
+
+    centers = (np.arange(len(gains), dtype=np.float64) + 0.5) * block_frames
+    frame_gain = np.interp(
+        np.arange(len(mixed), dtype=np.float64),
+        centers,
+        gains,
+        left=float(gains[0]),
+        right=float(gains[-1]),
+    )
+    # Join the untouched tracks without a gain discontinuity.
+    edge = min(SAMPLE_RATE, len(frame_gain) // 8)
+    if edge > 1:
+        frame_gain[:edge] = 1.0 + (frame_gain[:edge] - 1.0) * np.linspace(0.0, 1.0, edge)
+        frame_gain[-edge:] = 1.0 + (frame_gain[-edge:] - 1.0) * np.linspace(1.0, 0.0, edge)
+    return mixed * frame_gain[:, None].astype(np.float32)
 
 
 def _filter_sweep_mix(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray:
@@ -708,6 +797,11 @@ def mix_four_stem_transition(
     mixed += other_a * other_gain_a + other_b * other_gain_b
     mixed += left["vocals"] * vocal_gain_a + right["vocals"] * vocal_gain_b
     mixed += _reverb_tail(left["vocals"] * vocal_gain_a) * 0.12
+    mixed = _stabilize_transition_energy(
+        mixed,
+        sum(left.values()),
+        sum(right.values()),
+    )
     return (mixed * 0.90).astype(np.float32)
 
 
@@ -899,7 +993,7 @@ def render_mix(
                 if progress and frames_written % (SAMPLE_RATE * 60) < BLOCK_FRAMES:
                     progress(f"Rendered {frames_written / SAMPLE_RATE:7.1f}s")
 
-        limiter = "alimiter=limit=0.891251:attack=5:release=80:level=false"
+        limiter = LIMITER_FILTER
         codec = "pcm_s24le" if destination.suffix.lower() == ".wav" else "flac"
         subprocess.run(
             [
@@ -1076,7 +1170,7 @@ def render_pair_handoff(
                 "-i",
                 str(raw),
                 "-af",
-                "alimiter=limit=0.891251:attack=5:release=80:level=false",
+                LIMITER_FILTER,
                 *codec_args,
                 str(destination),
             ],
@@ -1222,7 +1316,7 @@ def render_transition_auditions(
                             "-i",
                             str(wave),
                             "-af",
-                            "alimiter=limit=0.891251:attack=5:release=80:level=false",
+                            LIMITER_FILTER,
                             "-codec:a",
                             "libmp3lame",
                             "-q:a",
