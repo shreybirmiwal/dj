@@ -22,7 +22,10 @@ from urllib.parse import urlparse
 AUDIO_SUFFIXES = {".aif", ".aiff", ".flac", ".m4a", ".mp3", ".wav"}
 UI_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = UI_DIR.parent
-MIX_CACHE_DIR = PROJECT_DIR / ".setmix-cache" / "ui-mixes"
+CACHE_ROOT = Path(os.environ.get("SETMIX_CACHE_DIR", PROJECT_DIR / ".setmix-cache")).expanduser()
+MIX_CACHE_DIR = CACHE_ROOT / "ui-mixes"
+MEDIA_CACHE_DIR = CACHE_ROOT / "ui-media"
+MEDIA_CACHE_LOCK = threading.Lock()
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
@@ -61,7 +64,7 @@ def _filename_metadata(path: Path) -> tuple[str, str]:
 
 def _analysis_cache() -> dict[str, dict]:
     values: dict[str, dict] = {}
-    for path in (PROJECT_DIR / ".setmix-cache" / "analysis").glob("*.json"):
+    for path in (CACHE_ROOT / "analysis").glob("*.json"):
         try:
             record = json.loads(path.read_text())
             source = record.get("path")
@@ -139,6 +142,47 @@ def build_catalog(music_dir: Path) -> list[dict]:
             }
         )
     return records
+
+
+def browser_media_path(path: Path) -> Path:
+    """Return audio WebKit/Chromium can decode, caching one MP3 per source revision."""
+    if path.suffix.lower() in {".m4a", ".mp3", ".wav"}:
+        return path
+    stat = path.stat()
+    fingerprint = hashlib.sha256(
+        f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}".encode()
+    ).hexdigest()[:24]
+    output = MEDIA_CACHE_DIR / f"{fingerprint}.mp3"
+    if output.exists():
+        return output
+    with MEDIA_CACHE_LOCK:
+        if output.exists():
+            return output
+        MEDIA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = MEDIA_CACHE_DIR / f"{fingerprint}.tmp.mp3"
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(path),
+                    "-map_metadata",
+                    "-1",
+                    "-c:a",
+                    "libmp3lame",
+                    "-q:a",
+                    "2",
+                    str(temporary),
+                ],
+                check=True,
+            )
+            temporary.replace(output)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return output
 
 
 class MixManager:
@@ -391,7 +435,10 @@ class SetMixHandler(SimpleHTTPRequestHandler):
             if not track:
                 self.send_error(404, "Track not found")
                 return
-            self._serve_media(track["_path"])
+            try:
+                self._serve_media(browser_media_path(track["_path"]))
+            except (OSError, subprocess.CalledProcessError) as error:
+                self.send_error(500, f"Could not prepare browser audio: {error}")
             return
         super().do_GET()
 
@@ -458,7 +505,10 @@ class SetMixHandler(SimpleHTTPRequestHandler):
             if not track:
                 self.send_error(404, "Track not found")
                 return
-            self._serve_media(track["_path"], head_only=True)
+            try:
+                self._serve_media(browser_media_path(track["_path"]), head_only=True)
+            except (OSError, subprocess.CalledProcessError) as error:
+                self.send_error(500, f"Could not prepare browser audio: {error}")
             return
         super().do_HEAD()
 
@@ -506,20 +556,29 @@ class SetMixHandler(SimpleHTTPRequestHandler):
                 remaining -= len(chunk)
 
 
+def create_server(music_dir: Path, port: int = 4173) -> ThreadingHTTPServer:
+    """Create a local SetMix HTTP server for the browser or desktop shell."""
+    music_dir = music_dir.expanduser().resolve()
+    if not music_dir.is_dir():
+        raise ValueError(f"Music folder does not exist: {music_dir}")
+
+    SetMixHandler.music_dir = music_dir
+    SetMixHandler.catalog = build_catalog(music_dir)
+    return ThreadingHTTPServer(("127.0.0.1", port), SetMixHandler)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve SetMix with a local music catalog")
     parser.add_argument("--music-dir", type=Path, default=default_music_dir())
     parser.add_argument("--port", type=int, default=4173)
     args = parser.parse_args()
-    music_dir = args.music_dir.expanduser().resolve()
-    if not music_dir.is_dir():
-        raise SystemExit(f"Music folder does not exist: {music_dir}")
-
-    SetMixHandler.music_dir = music_dir
-    SetMixHandler.catalog = build_catalog(music_dir)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), SetMixHandler)
+    try:
+        server = create_server(args.music_dir, args.port)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    music_dir = SetMixHandler.music_dir
     print(f"SetMix: {len(SetMixHandler.catalog)} tracks from {music_dir}")
-    print(f"Open http://localhost:{args.port}")
+    print(f"Open http://localhost:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,0 +1,1 @@
+"""SetMix local application UI."""

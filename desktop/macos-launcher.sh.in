@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+project_dir="__SETMIX_PROJECT__"
+cd "$project_dir"
+exec "$project_dir/.venv/bin/python" -m setmix.desktop "$@"

@@ -9,14 +9,19 @@ is connected over USB.
 
 1. Connect the FLX4's computer/device USB-C port directly to the computer.
 2. Close rekordbox, Serato, and other software that may already own its MIDI ports.
-3. Open SetMix at `http://localhost:4173` in current Google Chrome.
-4. Press **DDJ-FLX4 / Connect hardware** and allow MIDI access.
-5. Choose **DDJ-FLX4** under **Audio out**. MASTER and headphones then use the
-   controller's USB audio interface when the browser exposes it.
+3. Launch `~/Applications/SetMix.app` or run `scripts/setmix-app`.
+4. Set **DDJ-FLX4** as the macOS sound output if the controller should carry the
+   master audio. SetMix detects the MIDI ports automatically, including when the
+   controller is plugged in after launch.
 
-The Codex in-app browser can display the performance interface, but hardware
-MIDI and explicit audio-output selection require browser support. Use Chrome if
-the hardware badge says `OPEN IN CHROME FOR WEB MIDI`.
+The browser build remains available at `http://localhost:4173`; use current
+Google Chrome for its Web MIDI and explicit output-selection features. The
+desktop build owns MIDI natively, so it does not need browser MIDI permission.
+
+The current desktop audio engine uses one macOS system output. Master playback
+can therefore go through the FLX4, but independent master/headphone cue channels
+are not routed yet. Native multi-channel USB audio and pre-fader headphone cueing
+are the next hardware milestone.
 
 ## Implemented controls
 
@@ -44,4 +49,3 @@ Official references:
 
 - [DDJ-FLX4 driver information](https://support.alphatheta.com/en-us/articles/12410664372121)
 - [DDJ-FLX4 MIDI message list](https://downloads.support.alphatheta.com/software_info/dj-controllers/DDJ-FLX4/DDJ-FLX4_MIDI_message_List_E1.pdf)
-

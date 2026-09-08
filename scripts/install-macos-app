@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_dir=$(dirname -- "$script_dir")
+target_dir=${1:-"$HOME/Applications"}
+app_dir="$target_dir/SetMix.app"
+contents_dir="$app_dir/Contents"
+
+mkdir -p "$contents_dir/MacOS" "$contents_dir/Resources"
+
+escaped_project=$(printf '%s' "$project_dir" | sed 's/[\\&|]/\\&/g')
+sed "s|__SETMIX_PROJECT__|$escaped_project|g" "$project_dir/desktop/macos-launcher.sh.in" > "$contents_dir/MacOS/SetMix"
+chmod +x "$contents_dir/MacOS/SetMix"
+cp "$project_dir/desktop/Info.plist" "$contents_dir/Info.plist"
+
+echo "Installed $app_dir"
+echo "Open it from Finder or Spotlight."

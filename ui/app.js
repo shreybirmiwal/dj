@@ -31,7 +31,7 @@ const state = {
     highA: 0.5, highB: 0.5, midA: 0.5, midB: 0.5,
     lowA: 0.5, lowB: 0.5, filterA: 0.5, filterB: 0.5,
   },
-  controller: { connected: false, name: null, messages: 0 },
+  controller: { connected: false, native: false, name: null, messages: 0 },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -377,7 +377,20 @@ function setPlaybackState(playing, label) {
   $("#deckAPlay .transport-icon").textContent = playing ? "Ⅱ" : "▶";
   $("#playbackToggle").setAttribute("aria-label", playing ? "Pause continuous mix" : "Play continuous mix");
   $("#outputStatus").innerHTML = `<i></i> ${label}`;
-  if (midiOutput) midiOutput.send([0x90, 0x0b, playing ? 0x7f : 0]);
+  sendMidiFeedback([0x90, 0x0b, playing ? 0x7f : 0]);
+}
+
+function nativeDesktopApi() {
+  return window.pywebview?.api || null;
+}
+
+function sendMidiFeedback(data) {
+  if (midiOutput) {
+    midiOutput.send(data);
+    return;
+  }
+  const api = nativeDesktopApi();
+  if (api && state.controller.native) api.send_midi(data).catch(() => {});
 }
 
 function waitForMetadata(audio) {
@@ -762,6 +775,31 @@ async function refreshAudioOutputs() {
 
 async function connectController() {
   const button = $("#connectController");
+  const nativeApi = nativeDesktopApi();
+  if (nativeApi) {
+    try {
+      $("#hardwareStatus").textContent = "CONNECTING NATIVE MIDI…";
+      const result = await nativeApi.connect_controller();
+      if (!result.ok) throw new Error(result.error || "DDJ-FLX4 not detected");
+      state.controller.connected = true;
+      state.controller.native = true;
+      state.controller.name = result.name;
+      button.classList.remove("unsupported");
+      button.classList.add("connected");
+      $("#hardwareName").textContent = result.name;
+      $("#hardwareStatus").textContent = result.output ? "NATIVE MIDI I/O · READY" : "NATIVE MIDI INPUT · READY";
+      setPlaybackState(state.playing, state.playing ? "FLX4 control active" : "FLX4 ready");
+      await refreshAudioOutputs();
+      return;
+    } catch (error) {
+      state.controller.connected = false;
+      button.classList.remove("connected");
+      button.classList.add("unsupported");
+      $("#hardwareStatus").textContent = "NOT DETECTED · CHECK USB";
+      console.error(error);
+      return;
+    }
+  }
   if (!navigator.requestMIDIAccess) {
     button.classList.add("unsupported");
     $("#hardwareStatus").textContent = "OPEN IN CHROME FOR WEB MIDI";
@@ -789,6 +827,9 @@ async function selectAudioOutput(deviceId) {
       await graph.context.setSinkId(deviceId || "");
     } else if (audioPrimary.setSinkId) {
       await Promise.all([audioPrimary.setSinkId(deviceId), audioSecondary.setSinkId(deviceId)]);
+    } else if (nativeDesktopApi() && !deviceId) {
+      $("#hardwareStatus").textContent = state.controller.connected ? "NATIVE MIDI · SYSTEM AUDIO" : "SYSTEM AUDIO";
+      return;
     } else {
       throw new Error("Audio output selection requires Chrome 110+");
     }
@@ -798,6 +839,52 @@ async function selectAudioOutput(deviceId) {
     console.error(error);
   }
 }
+
+async function initializeDesktopRuntime() {
+  const api = nativeDesktopApi();
+  if (!api) return;
+  state.controller.native = true;
+  document.body.classList.add("desktop-runtime");
+  try {
+    const info = await api.runtime_info();
+    $("#runtimeBadge").textContent = `${String(info.platform).toUpperCase()} DESKTOP`;
+    const devices = await api.list_midi_devices();
+    if (devices.ok && devices.flx4Inputs?.length) {
+      await connectController();
+    } else {
+      $("#hardwareStatus").textContent = "NATIVE MIDI · AWAITING USB";
+    }
+  } catch (error) {
+    $("#hardwareStatus").textContent = "NATIVE BRIDGE ERROR";
+    console.error(error);
+  }
+}
+
+async function pollNativeController() {
+  const api = nativeDesktopApi();
+  if (!api || pollNativeController.running) return;
+  pollNativeController.running = true;
+  try {
+    const devices = await api.list_midi_devices();
+    const detected = Boolean(devices.ok && devices.flx4Inputs?.length);
+    if (detected && !state.controller.connected) {
+      await connectController();
+    } else if (!detected && state.controller.connected) {
+      state.controller.connected = false;
+      $("#connectController").classList.remove("connected");
+      $("#connectController").classList.add("unsupported");
+      $("#hardwareStatus").textContent = "NATIVE MIDI · AWAITING USB";
+    }
+  } catch (error) {
+    console.error(error);
+  } finally {
+    pollNativeController.running = false;
+  }
+}
+pollNativeController.running = false;
+
+window.addEventListener("setmix-midi", event => handleMidiMessage({ data: event.detail }));
+window.addEventListener("pywebviewready", initializeDesktopRuntime);
 
 $("#trackRows").addEventListener("click", (event) => {
   const button = event.target.closest("[data-mix-id]");
@@ -927,6 +1014,8 @@ setInterval(() => {
   }
   updateProgress();
 }, 1000);
+
+setInterval(pollNativeController, 3000);
 
 audioPrimary.addEventListener("ended", () => { if (currentAudio === audioPrimary) playNextImmediately(); });
 audioSecondary.addEventListener("ended", () => { if (currentAudio === audioSecondary) playNextImmediately(); });

@@ -12,6 +12,29 @@ and renders or plays staged drum, bass, melodic, and vocal handoffs.
 It does not choose songs. A text file or the command-line argument order is the
 playlist order.
 
+## Desktop app
+
+SetMix can run as a native macOS window with a private local audio server and a
+native DDJ-FLX4 MIDI bridge. It loads the DJ library from `~/Documents/DJ Music`
+(falling back to `~/Desktop/dj-music`) and reuses the same analysis, stems, and
+render cache as the CLI.
+
+```sh
+.venv/bin/pip install -r requirements-desktop.txt
+scripts/setmix-app
+```
+
+To add a Finder-launchable app to `~/Applications/SetMix.app`:
+
+```sh
+scripts/install-macos-app
+open ~/Applications/SetMix.app
+```
+
+The desktop app automatically connects an FLX4 when it is plugged in. See
+[`docs/DDJ_FLX4.md`](docs/DDJ_FLX4.md) for the control map and current USB audio
+routing notes.
+
 ## Browser UI
 
 The interactive catalog and continuous-mix interface lives in `ui/`. It reads
