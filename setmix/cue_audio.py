@@ -59,7 +59,19 @@ class NativeCueEngine:
         return self._sounddevice
 
     def list_outputs(self) -> list[dict[str, Any]]:
-        devices = self._audio_backend().query_devices()
+        backend = self._audio_backend()
+        devices = backend.query_devices()
+        default_output: int | None = None
+        try:
+            configured = backend.default.device
+            try:
+                # sounddevice uses a sequence-like DeviceList on macOS rather
+                # than a literal list/tuple for the input/output pair.
+                default_output = int(configured[1])
+            except (IndexError, TypeError):
+                default_output = int(configured)
+        except (AttributeError, IndexError, TypeError, ValueError):
+            pass
         outputs = []
         for index, device in enumerate(devices):
             channels = int(device.get("max_output_channels", 0))
@@ -72,6 +84,7 @@ class NativeCueEngine:
                     "outputChannels": channels,
                     "sampleRate": int(float(device.get("default_samplerate", 48000))),
                     "separateCue": channels >= 4,
+                    "isDefault": index == default_output,
                 }
             )
         return outputs
@@ -99,6 +112,8 @@ class NativeCueEngine:
                 "active": self._active_track_id is not None,
                 "trackId": self._active_track_id,
                 "device": self._active_device or (flx4["name"] if flx4 else None),
+                "defaultOutput": next((device["name"] for device in outputs if device["isDefault"]), None),
+                "masterRouted": bool(flx4 and flx4["isDefault"]),
                 "level": self._level,
                 "outputs": outputs,
             }
@@ -150,6 +165,55 @@ class NativeCueEngine:
         with self._lock:
             self._level = max(0.0, min(1.0, float(level)))
         return {"ok": True, "level": self._level}
+
+    def test_route(
+        self,
+        route: str,
+        *,
+        duration: float = 0.8,
+        level: float = 0.06,
+    ) -> dict[str, Any]:
+        """Play a short, quiet diagnostic tone on MASTER or PHONES only."""
+        if route not in {"master", "phones"}:
+            return {"ok": False, "error": "Audio test route must be master or phones"}
+        try:
+            device = self._cue_device()
+            self.stop()
+            sample_rate = int(device["sampleRate"] or 48000)
+            duration = max(0.25, min(2.0, float(duration)))
+            level = max(0.0, min(0.12, float(level)))
+            frames = max(1, round(sample_rate * duration))
+            frequency = 440.0 if route == "master" else 660.0
+            timeline = np.arange(frames, dtype=np.float32) / sample_rate
+            tone = np.sin(2.0 * np.pi * frequency * timeline).astype(np.float32)
+            fade_frames = min(frames // 2, max(1, round(sample_rate * 0.015)))
+            envelope = np.ones(frames, dtype=np.float32)
+            envelope[:fade_frames] = np.linspace(0.0, 1.0, fade_frames, dtype=np.float32)
+            envelope[-fade_frames:] = np.linspace(1.0, 0.0, fade_frames, dtype=np.float32)
+            stereo = np.column_stack((tone, tone)) * envelope[:, None] * level
+            routed = np.zeros((frames, 4), dtype=np.float32)
+            channel_slice = slice(0, 2) if route == "master" else slice(2, 4)
+            routed[:, channel_slice] = stereo
+            backend = self._audio_backend()
+            with backend.OutputStream(
+                samplerate=sample_rate,
+                device=device["index"],
+                channels=4,
+                dtype="float32",
+                blocksize=1024,
+                latency="low",
+            ) as stream:
+                stream.write(routed)
+            return {
+                "ok": True,
+                "route": route,
+                "device": device["name"],
+                "channels": "1/2" if route == "master" else "3/4",
+                "duration": duration,
+                "level": level,
+            }
+        except Exception as error:
+            return {"ok": False, "error": str(error), "route": route}
 
     def stop(self) -> dict[str, Any]:
         with self._lock:

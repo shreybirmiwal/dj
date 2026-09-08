@@ -27,12 +27,26 @@ class FakeOutputStream:
 class FakeSoundDevice:
     OutputStream = FakeOutputStream
 
+    class default:
+        device = (0, 1)
+
     @staticmethod
     def query_devices():
         return [
             {"name": "MacBook Speakers", "max_output_channels": 2, "default_samplerate": 48000},
             {"name": "DDJ-FLX4", "max_output_channels": 4, "default_samplerate": 44100},
         ]
+
+
+class SequenceLikeDefaultSoundDevice(FakeSoundDevice):
+    class DeviceList:
+        def __getitem__(self, index):
+            return (0, 1)[index]
+
+    class default:
+        device = None
+
+    default.device = DeviceList()
 
 
 class FakeStdout:
@@ -92,3 +106,39 @@ def test_cue_engine_requires_a_four_channel_flx4(tmp_path: Path):
     result = engine.start(track_id(source, tmp_path))
     assert result["ok"] is False
     assert "4-channel USB audio" in result["error"]
+
+
+def test_hardware_tones_are_isolated_between_master_and_phones(tmp_path: Path):
+    FakeOutputStream.writes = []
+    engine = NativeCueEngine(tmp_path, sounddevice_module=FakeSoundDevice())
+
+    master = engine.test_route("master", duration=0.25, level=0.05)
+    master_samples = FakeOutputStream.writes[-1]
+    phones = engine.test_route("phones", duration=0.25, level=0.05)
+    phone_samples = FakeOutputStream.writes[-1]
+
+    assert master["ok"] is True and master["channels"] == "1/2"
+    assert phones["ok"] is True and phones["channels"] == "3/4"
+    assert np.max(np.abs(master_samples[:, :2])) > 0
+    assert np.all(master_samples[:, 2:] == 0)
+    assert np.all(phone_samples[:, :2] == 0)
+    assert np.max(np.abs(phone_samples[:, 2:])) > 0
+
+
+def test_audio_status_reports_flx4_as_default_master(tmp_path: Path):
+    engine = NativeCueEngine(tmp_path, sounddevice_module=FakeSoundDevice())
+
+    status = engine.status()
+
+    assert status["available"] is True
+    assert status["masterRouted"] is True
+    assert status["defaultOutput"] == "DDJ-FLX4"
+
+
+def test_audio_status_supports_sounddevice_sequence_like_defaults(tmp_path: Path):
+    engine = NativeCueEngine(tmp_path, sounddevice_module=SequenceLikeDefaultSoundDevice())
+
+    status = engine.status()
+
+    assert status["masterRouted"] is True
+    assert status["defaultOutput"] == "DDJ-FLX4"

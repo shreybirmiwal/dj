@@ -76,6 +76,9 @@ class FakeCueEngine:
         self.level = level
         return {"ok": True, "level": level}
 
+    def test_route(self, route):
+        return {"ok": True, "route": route, "channels": "1/2" if route == "master" else "3/4"}
+
     def stop(self):
         self.stopped = True
         return {"ok": True, "active": False}
@@ -128,5 +131,21 @@ def test_native_bridge_exposes_separate_headphone_cue(tmp_path: Path):
     assert cue.started == ("track-1", {"offset_seconds": 15.0, "level": 0.6})
     assert bridge.set_headphone_level(0.25) == {"ok": True, "level": 0.25}
     assert bridge.stop_headphone_cue() == {"ok": True, "active": False}
+    assert bridge.test_audio_route("phones")["channels"] == "3/4"
     bridge.shutdown()
     assert cue.shutdown_called is True
+
+
+def test_hardware_diagnostics_report_midi_activity(tmp_path: Path):
+    midi = FakeMidi()
+    cue = FakeCueEngine()
+    bridge = DesktopBridge(tmp_path, mido_module=midi, cue_engine=cue)
+    bridge.set_window(FakeWindow())
+    bridge.connect_controller()
+    midi.input.callback(FakeMessage([0x90, 0x0B, 0x7F]))
+
+    diagnostics = bridge.hardware_diagnostics()
+
+    assert diagnostics["midi"]["connected"] is True
+    assert diagnostics["midi"]["messageCount"] == 1
+    assert diagnostics["midi"]["lastMessage"] == [0x90, 0x0B, 0x7F]

@@ -15,6 +15,23 @@ is connected over USB.
    channels 3/4 and the FLX4 headphones socket. SetMix detects MIDI and audio
    ports automatically, including when the controller is plugged in after launch.
 
+## First hardware test
+
+Click the **DDJ-FLX4** status button in the SetMix desktop app. The hardware-check
+panel verifies native MIDI, the four-channel CoreAudio device, and whether macOS
+currently routes system audio to the FLX4. Before playing a track:
+
+1. Turn MASTER LEVEL and HEADPHONES LEVEL down, then raise them slightly.
+2. Send the quiet **USB 1/2** test tone. It should be heard only through the RCA
+   master path.
+3. Send the quiet **USB 3/4** test tone. It should be heard only in headphones.
+4. Move a jog wheel or press a CUE button. The MIDI receive counter should move.
+5. Load two tracks, press deck B CUE to confirm private preview, then use deck A
+   PLAY/PAUSE and LOAD to test a real transition.
+
+The diagnostic tones are capped at a low digital level, but the analog MASTER and
+HEADPHONES knobs still control the final listening level.
+
 The browser build remains available at `http://localhost:4173`; use current
 Google Chrome for its Web MIDI and explicit output-selection features. The
 desktop build owns MIDI natively, so it does not need browser MIDI permission.

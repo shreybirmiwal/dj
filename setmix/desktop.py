@@ -56,6 +56,8 @@ class DesktopBridge:
         self._output: Any | None = None
         self._lock = threading.Lock()
         self._cue = cue_engine or NativeCueEngine(music_dir)
+        self._midi_message_count = 0
+        self._last_midi_message: list[int] | None = None
 
     def set_window(self, window: Any) -> None:
         self._window = window
@@ -96,6 +98,22 @@ class DesktopBridge:
 
     def set_headphone_level(self, level: float) -> dict[str, Any]:
         return self._cue.set_level(level)
+
+    def test_audio_route(self, route: str) -> dict[str, Any]:
+        return self._cue.test_route(str(route))
+
+    def hardware_diagnostics(self) -> dict[str, Any]:
+        midi = self.list_midi_devices()
+        audio = self.list_audio_outputs()
+        with self._lock:
+            count = self._midi_message_count
+            last_message = self._last_midi_message
+            connected = self._input is not None
+        return {
+            "ok": bool(midi.get("ok") and audio.get("ok")),
+            "midi": {**midi, "connected": connected, "messageCount": count, "lastMessage": last_message},
+            "audio": audio,
+        }
 
     def list_midi_devices(self) -> dict[str, Any]:
         try:
@@ -165,7 +183,12 @@ class DesktopBridge:
     def _on_midi_message(self, message: Any) -> None:
         try:
             values = list(message.bytes())
-            if len(values) < 3 or self._window is None:
+            if len(values) < 3:
+                return
+            with self._lock:
+                self._midi_message_count += 1
+                self._last_midi_message = values[:3]
+            if self._window is None:
                 return
             payload = json.dumps(values[:3])
             self._window.evaluate_js(

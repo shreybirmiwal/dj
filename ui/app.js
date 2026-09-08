@@ -48,6 +48,7 @@ let mixRequestGeneration = 0;
 let audioGraph = null;
 let midiAccess = null;
 let midiOutput = null;
+let hardwareCheckTimer = null;
 const automationGains = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
 const midiMsb = new Map();
 const waveformCache = new Map();
@@ -650,6 +651,103 @@ function nativeDesktopApi() {
   return window.pywebview?.api || null;
 }
 
+function setHardwareCheckRow(name, status, label, detail) {
+  const row = $(`#hw${name}Row`);
+  if (!row) return;
+  row.classList.remove("pass", "warn", "fail");
+  row.classList.add(status);
+  $(`#hw${name}State`).textContent = label;
+  $(`#hw${name}Detail`).textContent = detail;
+}
+
+async function refreshHardwareCheck({ connect = false } = {}) {
+  const api = nativeDesktopApi();
+  if (!api) {
+    setHardwareCheckRow("Midi", "fail", "NATIVE APP", "Launch SetMix.app for direct MIDI access.");
+    setHardwareCheckRow("Audio", "fail", "NATIVE APP", "Four-channel route testing is unavailable in the browser build.");
+    setHardwareCheckRow("Route", "warn", "UNKNOWN", "The browser cannot inspect the macOS default output.");
+    return;
+  }
+  try {
+    let diagnostics = await api.hardware_diagnostics();
+    if (connect && diagnostics.midi?.flx4Inputs?.length && !diagnostics.midi.connected) {
+      const connected = await api.connect_controller();
+      if (connected.ok) {
+        state.controller.connected = true;
+        state.controller.native = true;
+        state.controller.name = connected.name;
+        $("#connectController").classList.add("connected");
+        $("#hardwareName").textContent = connected.name;
+      }
+      diagnostics = await api.hardware_diagnostics();
+    }
+    const midi = diagnostics.midi || {};
+    const audio = diagnostics.audio || {};
+    const flx4Audio = (audio.outputs || []).find(device => /DDJ[- ]?FLX4|Pioneer DJ/i.test(device.name));
+    const midiReady = Boolean(midi.connected);
+    setHardwareCheckRow(
+      "Midi",
+      midiReady ? "pass" : "fail",
+      midiReady ? "CONNECTED" : "NOT FOUND",
+      midiReady ? `${midi.flx4Inputs[0]} · move a control to verify RX` : "Connect USB and close other DJ software.",
+    );
+    setHardwareCheckRow(
+      "Audio",
+      audio.available ? "pass" : "fail",
+      audio.available ? "4 CHANNEL" : "NOT READY",
+      audio.available ? `${flx4Audio?.name || audio.device} · ${flx4Audio?.sampleRate || 44100} Hz` : "FLX4 must appear as a four-output CoreAudio device.",
+    );
+    setHardwareCheckRow(
+      "Route",
+      audio.masterRouted ? "pass" : "warn",
+      audio.masterRouted ? "FLX4 DEFAULT" : "SET OUTPUT",
+      audio.masterRouted ? "Continuous master audio will reach USB 1/2 and the RCA outputs." : `macOS default: ${audio.defaultOutput || "unknown"} · select DDJ-FLX4 in Sound settings.`,
+    );
+    $("#testMasterRoute").disabled = !audio.available;
+    $("#testPhonesRoute").disabled = !audio.available;
+    $("#hwMessageCount").textContent = `${midi.messageCount || 0} MIDI messages received${midi.lastMessage ? ` · ${midi.lastMessage.join(" ")}` : ""}`;
+  } catch (error) {
+    setHardwareCheckRow("Midi", "fail", "BRIDGE ERROR", error.message);
+    console.error(error);
+  }
+}
+
+function openHardwareCheck() {
+  const dialog = $("#hardwareCheck");
+  if (dialog.showModal) dialog.showModal();
+  else dialog.setAttribute("open", "");
+  if (nativeDesktopApi()) refreshHardwareCheck({ connect: true });
+  else connectController().finally(refreshHardwareCheck);
+  clearInterval(hardwareCheckTimer);
+  hardwareCheckTimer = setInterval(refreshHardwareCheck, 1000);
+}
+
+function closeHardwareCheck() {
+  const dialog = $("#hardwareCheck");
+  clearInterval(hardwareCheckTimer);
+  hardwareCheckTimer = null;
+  if (dialog.close) dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function runHardwareTone(route) {
+  const api = nativeDesktopApi();
+  const resultNode = route === "master" ? $("#masterTestResult") : $("#phonesTestResult");
+  resultNode.className = "";
+  resultNode.textContent = "Sending low-level diagnostic tone…";
+  if (!api) {
+    resultNode.className = "fail";
+    resultNode.textContent = "Native app required";
+    return;
+  }
+  const result = await api.test_audio_route(route);
+  resultNode.className = result.ok ? "pass" : "fail";
+  resultNode.textContent = result.ok
+    ? `Sent to ${result.device} USB ${result.channels} · confirm isolation by ear`
+    : (result.error || "Route test failed");
+  refreshHardwareCheck();
+}
+
 function updateCueControls(message = null) {
   document.querySelectorAll("[data-channel-cue]").forEach(button => {
     button.classList.toggle("active", state.cue.channel === button.dataset.channelCue);
@@ -1138,6 +1236,10 @@ function handleMidiMessage(event) {
   const channel = status & 0x0f;
   state.controller.messages += 1;
   $("#hardwareStatus").textContent = `MIDI ACTIVE · ${state.controller.messages} RX`;
+  if ($("#hardwareCheck")?.open) {
+    setHardwareCheckRow("Midi", "pass", "RX ACTIVE", `Received ${event.data.join(" ")} · hardware control path is live.`);
+    $("#hwMessageCount").textContent = `${state.controller.messages} MIDI messages received · ${event.data.join(" ")}`;
+  }
   if (type === 0x90 || type === 0x80) processMidiNote(channel, data1, type === 0x80 ? 0 : data2);
   if (type === 0xb0) processMidiControl(channel, data1, data2);
 }
@@ -1328,7 +1430,12 @@ $("#deckBLoad").addEventListener("click", () => queueTrack(state.suggestion));
 $("#approveNext").addEventListener("click", () => queueTrack(state.suggestion));
 $("#rejectNext").addEventListener("click", () => cycleSuggestion(1));
 $("#forceMix").addEventListener("click", forceSmartMixNow);
-$("#connectController").addEventListener("click", connectController);
+$("#connectController").addEventListener("click", openHardwareCheck);
+$("#closeHardwareCheck").addEventListener("click", closeHardwareCheck);
+$("#finishHardwareCheck").addEventListener("click", closeHardwareCheck);
+$("#refreshHardwareCheck").addEventListener("click", () => refreshHardwareCheck({ connect: true }));
+$("#testMasterRoute").addEventListener("click", () => runHardwareTone("master"));
+$("#testPhonesRoute").addEventListener("click", () => runHardwareTone("phones"));
 $("#audioOutput").addEventListener("change", event => selectAudioOutput(event.target.value));
 $("#loopToggle").addEventListener("click", () => setLoopEnabled(!state.loop.enabled));
 $("#lyricsViewToggle").addEventListener("click", event => {

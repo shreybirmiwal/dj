@@ -351,6 +351,44 @@
       <span class="toast-check">✓</span><span><strong>Added to the mix</strong><small>SetMix will bring it in at the best moment.</small></span>
     </div>
 
+    <dialog class="hardware-check" id="hardwareCheck">
+      <header>
+        <div><span>HARDWARE CHECK</span><h2>DDJ-FLX4 readiness</h2></div>
+        <button id="closeHardwareCheck" aria-label="Close hardware check">×</button>
+      </header>
+      <p class="hardware-check-intro">Connect the computer USB-C port directly. Close rekordbox and Serato, then validate each path before playing music.</p>
+      <section>
+        <div class="hardware-check-row" id="hwMidiRow">
+          <i></i><div><b>MIDI control</b><small id="hwMidiDetail">Waiting for native controller scan…</small></div><strong id="hwMidiState">CHECKING</strong>
+        </div>
+        <div class="hardware-check-row" id="hwAudioRow">
+          <i></i><div><b>Four-channel USB audio</b><small id="hwAudioDetail">Looking for MASTER 1/2 and PHONES 3/4…</small></div><strong id="hwAudioState">CHECKING</strong>
+        </div>
+        <div class="hardware-check-row" id="hwRouteRow">
+          <i></i><div><b>Continuous master route</b><small id="hwRouteDetail">Checking the macOS default output…</small></div><strong id="hwRouteState">CHECKING</strong>
+        </div>
+      </section>
+      <div class="hardware-tests">
+        <article>
+          <span>USB 1/2</span><b>RCA MASTER test</b>
+          <p>Turn MASTER LEVEL down first, then raise it slightly. The quiet tone should only reach the RCA output.</p>
+          <button id="testMasterRoute">SEND QUIET 440 HZ TONE</button>
+          <small id="masterTestResult">Not tested</small>
+        </article>
+        <article>
+          <span>USB 3/4</span><b>HEADPHONES test</b>
+          <p>Plug headphones into the FLX4 and keep their level low. This tone should not reach the RCA output.</p>
+          <button id="testPhonesRoute">SEND QUIET 660 HZ TONE</button>
+          <small id="phonesTestResult">Not tested</small>
+        </article>
+      </div>
+      <footer>
+        <span id="hwMessageCount">0 MIDI messages received</span>
+        <button id="refreshHardwareCheck">RESCAN</button>
+        <button class="primary" id="finishHardwareCheck">DONE</button>
+      </footer>
+    </dialog>
+
     <audio id="audioPrimary" preload="metadata"></audio>
     <audio id="audioSecondary" preload="metadata"></audio>
 
