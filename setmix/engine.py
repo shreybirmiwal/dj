@@ -894,8 +894,11 @@ def mix_four_stem_transition(
     vocal_fade = max(4.0 * beat, 0.06)
     vocal_exit = schedule["outgoing_vocal_exit"]
     vocal_entry = schedule["incoming_vocal_entry"]
-    vocal_gain_a = fade_out(vocal_exit - vocal_fade, vocal_exit)
-    vocal_gain_b = fade_in(vocal_entry, vocal_entry + vocal_fade)
+    # Event times describe the lyric boundary itself. Keep the outgoing singer
+    # fully present through the final word, then remove the tail; establish the
+    # incoming singer just before their first word so that word is not faded.
+    vocal_gain_a = fade_out(vocal_exit, vocal_exit + 0.5 * vocal_fade)
+    vocal_gain_b = fade_in(vocal_entry - vocal_fade, vocal_entry)
 
     mixed = left["drums"] * drum_a + right["drums"] * drum_b
     mixed += left["bass"] * bass_a + right["bass"] * bass_b
@@ -993,8 +996,8 @@ def mix_loop_bridge_transition(
     else:
         other_gain_a = fade_out(melody - 2.0 * event_fade, melody - event_fade)
         other_gain_b = fade_in(melody + event_fade, melody + 2.0 * event_fade)
-    vocal_a = fade_out(vocal_exit - event_fade, vocal_exit)
-    vocal_b = fade_in(vocal_entry, vocal_entry + event_fade)
+    vocal_a = fade_out(vocal_exit, vocal_exit + 0.5 * event_fade)
+    vocal_b = fade_in(vocal_entry - event_fade, vocal_entry)
 
     mixed = left["drums"] * drum_a + loop * loop_gain + right["drums"] * drum_b
     mixed += left["bass"] * bass_a + right["bass"] * bass_b
@@ -1589,7 +1592,10 @@ def render_transition_auditions(
         "reverb_tail",
     ),
     selected_only: bool = False,
+    output_format: str = "mp3",
 ) -> list[Path]:
+    if output_format not in {"mp3", "flac"}:
+        raise ValueError("Audition format must be mp3 or flac")
     root = Path(output_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     cache_root = Path(".setmix-cache/stretched")
@@ -1690,10 +1696,15 @@ def render_transition_auditions(
                         after * _track_gain(plan.tracks[index + 1]),
                     )
                 )
-                destination = root / f"transition-{index + 1:02d}-{technique}.mp3"
+                destination = root / f"transition-{index + 1:02d}-{technique}.{output_format}"
                 with tempfile.TemporaryDirectory(prefix="setmix-audition-") as temp_dir:
                     wave = Path(temp_dir) / "audition.wav"
                     sf.write(wave, audition, SAMPLE_RATE, subtype="FLOAT")
+                    codec = (
+                        ["-codec:a", "flac"]
+                        if output_format == "flac"
+                        else ["-codec:a", "libmp3lame", "-q:a", "0"]
+                    )
                     subprocess.run(
                         [
                             "ffmpeg",
@@ -1704,10 +1715,7 @@ def render_transition_auditions(
                             str(wave),
                             "-af",
                             LIMITER_FILTER,
-                            "-codec:a",
-                            "libmp3lame",
-                            "-q:a",
-                            "2",
+                            *codec,
                             str(destination),
                         ],
                         check=True,

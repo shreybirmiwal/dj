@@ -65,3 +65,24 @@ def test_vocal_separation_reuses_four_stem_pass(tmp_path, monkeypatch) -> None:
     assert accompaniment.read_bytes() == b"mix"
     assert len(commands) == 1
     assert "--two-stems" not in commands[0]
+
+
+def test_new_four_stem_pass_is_lossless_flac(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "track.wav"
+    source.write_bytes(b"audio")
+    commands = []
+
+    def fake_run(command, check):
+        commands.append(command)
+        output = Path(command[command.index("-o") + 1]) / "htdemucs" / source.stem
+        output.mkdir(parents=True)
+        for name in ("vocals", "drums", "bass", "other"):
+            (output / f"{name}.flac").write_bytes(name.encode())
+
+    monkeypatch.setattr(stem_module.subprocess, "run", fake_run)
+    result = stem_module.separate_stems(source, cache_dir=tmp_path / "stems4")
+
+    assert all(path.suffix == ".flac" for path in result.values())
+    assert "--flac" in commands[0]
+    assert "--mp3" not in commands[0]
+    assert commands[0][commands[0].index("--clip-mode") + 1] == "clamp"

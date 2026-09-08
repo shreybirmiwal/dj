@@ -63,6 +63,9 @@ song an intentional entrance rather than merely crossfading two masters.
 - Low-pass, high-pass, EQ swaps, loops, echo, and reverb are useful only when
   they support a musical event. Effects are not substitutes for phrasing.
 - Output must remain centered stereo; a one-sided/left-only result is a failure.
+- Protect high-energy sing-along lines. Do not make the vocal or its backing
+  perceptibly retreat while the crowd is expected to finish the lyric; preserve
+  the complete phrase, then use the following instrumental release for removal.
 
 ### Quality and development
 
@@ -187,6 +190,27 @@ song an intentional entrance rather than merely crossfading two masters.
   - No sudden broadband level or spectral jump.
 - Note: v4 is directionally approved but retains a small late beat clash. The
   instrumental-bed/vocal-pocket idea remains a future alternate arrangement.
+
+### Give Me Everything -> I Love It
+
+- Reference: `output/top-techniques/loop-bridge/transition-01-loop_bridge.mp3`
+- Human feedback: the transition begins fading during the high-energy “give me
+  everything tonight” sing-along; the audience should be allowed to finish the
+  line before vocals are removed. Audio quality also sounds slightly off.
+- Status: **OPEN / revised render required**.
+- General response:
+  - Interpret a lyric event as the end of the protected phrase, not the end of a
+    fade that started several beats earlier.
+  - Keep the outgoing backing groove intact through that phrase, then leave a
+    short instrumental release before later layers depart.
+  - Bring an incoming vocal to full level by its first word rather than fading
+    through the word.
+  - Lossy MP3 Demucs stems exposed decoder delay when read by sample index and
+    added another encode generation. New neural stem caches must be lossless and
+    sample-aligned.
+  - Demucs' default independent per-stem peak rescaling altered the balance of
+    the reconstructed master. Preserve relative stem gain; clamp only genuinely
+    out-of-range isolated samples before the final transition limiter.
 
 ## Current tunables and why they exist
 

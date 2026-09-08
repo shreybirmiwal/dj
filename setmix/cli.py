@@ -124,6 +124,12 @@ def _parser() -> argparse.ArgumentParser:
     audition.add_argument("--word-model", default="base", help="faster-whisper model used by --smart")
     audition.add_argument("--technique", choices=TECHNIQUES, default="auto")
     audition.add_argument(
+        "--format",
+        choices=("mp3", "flac"),
+        default="mp3",
+        help="preview codec; FLAC avoids another lossy generation",
+    )
+    audition.add_argument(
         "--selected-only",
         action="store_true",
         help="render only the technique selected for each transition",
@@ -240,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
                 mix_plan,
                 args.output,
                 selected_only=args.selected_only,
+                output_format=args.format,
             )
             for output in outputs:
                 _progress(f"Wrote {output}")

@@ -38,17 +38,17 @@ class VocalMap:
 
 def _key(path: Path) -> str:
     stat = path.stat()
-    value = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:htdemucs-v1"
+    value = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:htdemucs-flac-v3"
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
 def _stem_paths(path: Path, cache_root: Path) -> tuple[Path, Path, Path]:
     root = cache_root / _key(path)
-    candidates = list((root / "htdemucs").glob("*/vocals.mp3"))
+    candidates = list((root / "htdemucs").glob("*/vocals.flac"))
     if candidates:
         vocal = candidates[0]
-        return root, vocal, vocal.with_name("no_vocals.mp3")
-    return root, root / "missing-vocals.mp3", root / "missing-no-vocals.mp3"
+        return root, vocal, vocal.with_name("no_vocals.flac")
+    return root, root / "missing-vocals.flac", root / "missing-no-vocals.flac"
 
 
 def _resolve_device(device: str) -> str:
@@ -68,7 +68,7 @@ def _resolve_device(device: str) -> str:
 
 def _four_stem_key(path: Path) -> str:
     stat = path.stat()
-    value = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:htdemucs-4-v1"
+    value = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:htdemucs-4-flac-v3"
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
@@ -82,27 +82,28 @@ def separate_stems(
     source = Path(path).expanduser().resolve()
     root = Path(cache_dir) / _four_stem_key(source)
     model_root = root / "htdemucs"
-    candidates = list(model_root.glob("*/vocals.mp3"))
+    candidates = list(model_root.glob("*/vocals.flac"))
     if candidates:
         folder = candidates[0].parent
-        result = {name: folder / f"{name}.mp3" for name in ("vocals", "drums", "bass", "other")}
+        result = {name: folder / f"{name}.flac" for name in ("vocals", "drums", "bass", "other")}
         if all(item.exists() for item in result.values()):
             return result
     with STEM_CACHE_LOCK:
-        candidates = list(model_root.glob("*/vocals.mp3"))
+        candidates = list(model_root.glob("*/vocals.flac"))
         if candidates:
             folder = candidates[0].parent
-            result = {name: folder / f"{name}.mp3" for name in ("vocals", "drums", "bass", "other")}
+            result = {name: folder / f"{name}.flac" for name in ("vocals", "drums", "bass", "other")}
             if all(item.exists() for item in result.values()):
                 return result
         root.mkdir(parents=True, exist_ok=True)
         command = [
             sys.executable,
             "-m",
-            "demucs.separate",
-            "--mp3",
-            "--mp3-bitrate",
-            "320",
+            "setmix.demucs_runner",
+            "--flac",
+            "--int24",
+            "--clip-mode",
+            "clamp",
             "-n",
             "htdemucs",
             "-d",
@@ -117,11 +118,11 @@ def separate_stems(
             raise RuntimeError(
                 "Four-stem mixing requires the optional stem dependencies from requirements-stems.txt"
             ) from error
-    candidates = list(model_root.glob("*/vocals.mp3"))
+    candidates = list(model_root.glob("*/vocals.flac"))
     if not candidates:
         raise RuntimeError(f"Stem separation did not produce expected outputs for {source}")
     folder = candidates[0].parent
-    result = {name: folder / f"{name}.mp3" for name in ("vocals", "drums", "bass", "other")}
+    result = {name: folder / f"{name}.flac" for name in ("vocals", "drums", "bass", "other")}
     if not all(item.exists() for item in result.values()):
         raise RuntimeError(f"Stem separation was incomplete for {source}")
     return result
@@ -143,11 +144,13 @@ def separate_vocals(
     # four-stem pass so rendering does not perform the same inference twice.
     four_stem_root = Path(cache_dir).expanduser().parent / "stems4"
     stems = separate_stems(source, cache_dir=four_stem_root, device=device)
-    accompaniment = stems["vocals"].with_name("no_vocals.mp3")
+    extension = stems["vocals"].suffix
+    accompaniment = stems["vocals"].with_name(f"no_vocals{extension}")
     if not accompaniment.exists():
         with STEM_CACHE_LOCK:
             if not accompaniment.exists():
-                temporary = accompaniment.with_suffix(".partial.mp3")
+                temporary = accompaniment.with_name(f"no_vocals.partial{extension}")
+                codec = ["-c:a", "flac"] if extension == ".flac" else ["-c:a", "libmp3lame", "-b:a", "320k"]
                 command = [
                     "ffmpeg",
                     "-v",
@@ -161,10 +164,7 @@ def separate_vocals(
                     str(stems["other"]),
                     "-filter_complex",
                     "amix=inputs=3:duration=longest:normalize=0,alimiter=limit=0.95",
-                    "-c:a",
-                    "libmp3lame",
-                    "-b:a",
-                    "320k",
+                    *codec,
                     str(temporary),
                 ]
                 try:

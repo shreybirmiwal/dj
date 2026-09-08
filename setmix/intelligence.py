@@ -90,7 +90,7 @@ class TransitionCandidate:
 
 def _cache_key(path: Path, suffix: str) -> str:
     stat = path.stat()
-    value = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{suffix}:v1"
+    value = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{suffix}:v3"
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
@@ -385,6 +385,14 @@ def _word_boundary_score(
     return float(score), float(distance)
 
 
+def _vocal_map_boundary_score(vocals: VocalMap, second: float, *, outgoing: bool) -> float:
+    boundaries = [segment[1 if outgoing else 0] for segment in vocals.segments]
+    if not boundaries:
+        return 0.5
+    distance = min(abs(second - boundary) for boundary in boundaries)
+    return float(math.exp(-distance / 0.75))
+
+
 def _event_schedule(
     left: TrackIntelligence,
     right: TrackIntelligence,
@@ -405,7 +413,7 @@ def _event_schedule(
     if left.transcript:
         for phrase in left.transcript.phrases:
             position = normalized(phrase.end, left_start, left_duration)
-            if 0.14 <= position <= 0.52:
+            if 0.14 <= position <= 0.60:
                 quiet = 1.0 - left_vocals.activity_fraction(
                     phrase.end,
                     min(left_start + left_duration, phrase.end + 2.5),
@@ -413,7 +421,7 @@ def _event_schedule(
                 exit_candidates.append((0.65 * quiet + 0.35 * math.exp(-abs(position - 0.34) / 0.18), position))
     for _start, end in left_vocals.segments:
         position = normalized(end, left_start, left_duration)
-        if 0.14 <= position <= 0.52:
+        if 0.14 <= position <= 0.60:
             quiet = 1.0 - left_vocals.activity_fraction(end, min(left_start + left_duration, end + 2.5))
             exit_candidates.append((0.75 * quiet + 0.25 * math.exp(-abs(position - 0.34) / 0.18), position))
     vocal_exit = max(exit_candidates)[1] if exit_candidates else 0.36
@@ -452,12 +460,16 @@ def _event_schedule(
     )
     bass_handoff = float(np.clip(bass_handoff, 0.38, 0.70))
 
-    vocal_exit = float(np.clip(vocal_exit, 0.14, min(0.52, bass_handoff - 0.02)))
+    vocal_exit = float(np.clip(vocal_exit, 0.14, 0.60))
+    # A recognizable lyric owns the complete backing groove. If a detected
+    # drop/boundary would start removing bass under that line, postpone the
+    # instrumental handoff rather than forcing the singer into the landmark.
+    bass_handoff = float(np.clip(max(bass_handoff, vocal_exit + 0.12), 0.38, 0.74))
     vocal_entry = float(
-        np.clip(vocal_entry, max(0.54, bass_handoff + 0.08, vocal_exit + 0.18), 0.90)
+        np.clip(vocal_entry, max(0.54, bass_handoff + 0.08, vocal_exit + 0.18), 0.92)
     )
     melody_handoff = float(np.clip(bass_handoff + 0.04, vocal_exit + 0.06, vocal_entry - 0.06))
-    drum_handoff = float(np.clip(bass_handoff - 0.10, 0.25, 0.60))
+    drum_handoff = float(np.clip(max(bass_handoff - 0.10, vocal_exit + 0.10), 0.25, 0.70))
     return {
         "outgoing_vocal_exit": round(vocal_exit, 6),
         "drum_handoff": round(drum_handoff, 6),
@@ -683,6 +695,24 @@ def rank_transition_candidates(
                 right_intelligence.transcript,
                 right_start + events["incoming_vocal_entry"] * right_source_duration,
                 outgoing=False,
+            )
+            left_word = max(
+                left_word,
+                0.85
+                * _vocal_map_boundary_score(
+                    left_vocals,
+                    left_start + events["outgoing_vocal_exit"] * left_source_duration,
+                    outgoing=True,
+                ),
+            )
+            right_word = max(
+                right_word,
+                0.85
+                * _vocal_map_boundary_score(
+                    right_vocals,
+                    right_start + events["incoming_vocal_entry"] * right_source_duration,
+                    outgoing=False,
+                ),
             )
             section_score = _section_score(left_section, right_section)
             energy_score = 1.0 - abs(

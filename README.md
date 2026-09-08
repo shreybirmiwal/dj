@@ -103,6 +103,10 @@ scripts/setmix --bars 32 audition first.flac second.flac \
   --smart --technique stem_phrase --selected-only -o output/smart-preview
 ```
 
+Add `--format flac` for a lossless listening check. MP3 auditions use the
+highest LAME VBR quality, but FLAC is preferable when diagnosing stem or
+time-stretch artifacts.
+
 Run the intelligence layer without planning or rendering:
 
 ```sh

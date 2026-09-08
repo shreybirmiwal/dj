@@ -211,6 +211,36 @@ def test_four_stem_transition_is_finite() -> None:
     assert float(np.max(np.abs(result))) < 1.0
 
 
+def test_vocal_events_protect_the_last_outgoing_and_first_incoming_words() -> None:
+    frames = 44100 * 8
+    empty = np.zeros((frames, 2), dtype="float32")
+    left_vocal = np.zeros_like(empty)
+    right_vocal = np.zeros_like(empty)
+    left_vocal[:, 0] = 0.1
+    right_vocal[:, 1] = 0.1
+    left = {"vocals": left_vocal, "drums": empty, "bass": empty, "other": empty}
+    right = {"vocals": right_vocal, "drums": empty, "bass": empty, "other": empty}
+    result = mix_four_stem_transition(
+        left,
+        right,
+        1.0,
+        1.0,
+        bars=16,
+        events={"outgoing_vocal_exit": 0.30, "incoming_vocal_entry": 0.80},
+    )
+
+    def channel_mean(position: float, channel: int) -> float:
+        center = round(position * frames)
+        width = frames // 200
+        return float(np.mean(np.abs(result[center - width : center + width, channel])))
+
+    # The outgoing line remains full through its event and disappears after it.
+    assert channel_mean(0.295, 0) > 0.07
+    assert channel_mean(0.36, 0) < 0.025
+    # The destination singer is already established when their first word lands.
+    assert channel_mean(0.80, 1) > 0.07
+
+
 def test_four_stem_transition_lifts_an_unexpectedly_empty_center() -> None:
     frames = 44100 * 8
     time = np.arange(frames) / 44100.0
