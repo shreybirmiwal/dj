@@ -1,4 +1,5 @@
 import subprocess
+import json
 from pathlib import Path
 
 from ui import server
@@ -36,6 +37,47 @@ def test_waveform_summary_uses_real_samples_and_cache(tmp_path: Path, monkeypatc
     assert any(sum(row) > 0 for row in first["bands"])
     assert first == second
     assert len(calls) == 1
+
+
+def test_lyrics_summary_returns_timestamped_machine_transcript(tmp_path: Path, monkeypatch):
+    source = tmp_path / "song.flac"
+    source.write_bytes(b"audio")
+    cache = tmp_path / "intelligence"
+    transcript = cache / "fingerprint" / "transcript.json"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({
+        "path": str(source.resolve()),
+        "model": "faster-whisper/base",
+        "language": "en",
+        "confidence": 0.91,
+        "phrases": [{"start": 12.5, "end": 15.0, "text": "A lyric line"}],
+        "words": [{"word": "lyric", "start": 12.9, "end": 13.4, "probability": 0.95}],
+    }))
+    monkeypatch.setattr(server, "INTELLIGENCE_CACHE_DIR", cache)
+
+    result = server.lyrics_summary(source)
+
+    assert result["status"] == "ready"
+    assert result["language"] == "en"
+    assert result["phrases"][0]["start"] == 12.5
+    assert result["words"][0]["probability"] == 0.95
+
+
+def test_lyrics_summary_reports_missing_without_starting_analysis(tmp_path: Path, monkeypatch):
+    source = tmp_path / "song.flac"
+    source.write_bytes(b"audio")
+    monkeypatch.setattr(server, "INTELLIGENCE_CACHE_DIR", tmp_path / "empty")
+
+    result = server.lyrics_summary(source)
+
+    assert result == {
+        "status": "missing",
+        "model": None,
+        "language": None,
+        "confidence": 0.0,
+        "phrases": [],
+        "words": [],
+    }
 
 
 def test_browser_media_transcodes_flac_once(tmp_path: Path, monkeypatch):

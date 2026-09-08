@@ -51,6 +51,10 @@ const automationGains = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
 const midiMsb = new Map();
 const waveformCache = new Map();
 const waveformRequests = new Map();
+const lyricsCache = new Map();
+const lyricsRequests = new Map();
+const lyricsCheckedAt = new Map();
+const lyricPollTimers = new Map();
 const JOIN_FADE_SECONDS = 0.35;
 const formatTime = (seconds) => {
   const value = Math.max(0, Math.floor(seconds));
@@ -150,6 +154,138 @@ async function loadWaveform(track) {
     .finally(() => waveformRequests.delete(key));
   waveformRequests.set(key, request);
   return request;
+}
+
+function lyricState(track) {
+  return track ? lyricsCache.get(String(track.id)) : null;
+}
+
+async function loadLyrics(track, { force = false } = {}) {
+  if (!track) return null;
+  const key = String(track.id);
+  const cached = lyricsCache.get(key);
+  const checked = lyricsCheckedAt.get(key) || 0;
+  if (!force && cached?.status === "ready") return cached;
+  if (!force && cached && Date.now() - checked < 5000) return cached;
+  if (lyricsRequests.has(key)) return lyricsRequests.get(key);
+  const request = fetch(`/api/lyrics/${encodeURIComponent(key)}`, { cache: "no-store" })
+    .then(response => response.ok ? response.json() : Promise.reject(new Error(`lyrics ${response.status}`)))
+    .then(data => {
+      lyricsCache.set(key, data);
+      lyricsCheckedAt.set(key, Date.now());
+      renderDeckLyrics("A", state.current, logicalSourceSeconds());
+      renderDeckLyrics("B", state.queued || state.suggestion, Number((state.queued || state.suggestion)?.cueIn) || 0);
+      if (["queued", "working"].includes(data.status)) scheduleLyricPoll(track);
+      return data;
+    })
+    .catch(error => {
+      console.error(error);
+      const data = { status: "error", message: error.message, phrases: [], words: [] };
+      lyricsCache.set(key, data);
+      lyricsCheckedAt.set(key, Date.now());
+      return data;
+    })
+    .finally(() => lyricsRequests.delete(key));
+  lyricsRequests.set(key, request);
+  return request;
+}
+
+function scheduleLyricPoll(track) {
+  const key = String(track.id);
+  if (lyricPollTimers.has(key)) return;
+  const timer = window.setTimeout(async () => {
+    lyricPollTimers.delete(key);
+    const result = await loadLyrics(track, { force: true });
+    if (["queued", "working"].includes(result?.status)) scheduleLyricPoll(track);
+  }, 1400);
+  lyricPollTimers.set(key, timer);
+}
+
+async function analyzeLyrics(track) {
+  if (!track) return;
+  const key = String(track.id);
+  lyricsCache.set(key, { status: "queued", message: "Sending track to lyric analysis", progress: 2, phrases: [], words: [] });
+  updatePerformanceConsole();
+  try {
+    const response = await fetch(`/api/lyrics/${encodeURIComponent(key)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wordModel: "base" }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not analyze lyrics");
+    lyricsCache.set(key, result);
+    lyricsCheckedAt.set(key, Date.now());
+    updatePerformanceConsole();
+    if (["queued", "working"].includes(result.status)) scheduleLyricPoll(track);
+  } catch (error) {
+    lyricsCache.set(key, { status: "error", message: error.message, phrases: [], words: [] });
+    updatePerformanceConsole();
+  }
+}
+
+function setTimestampedLyricLine(element, transcript, phrase, second) {
+  element.replaceChildren();
+  if (!phrase) {
+    element.textContent = "—";
+    return;
+  }
+  const words = (transcript.words || []).filter(word => word.start < phrase.end + 0.05 && word.end > phrase.start - 0.05);
+  if (!words.length) {
+    element.textContent = phrase.text;
+    return;
+  }
+  words.forEach(word => {
+    const token = document.createElement("span");
+    token.textContent = word.word;
+    token.title = `${formatDeckTime(word.start)} · ${Math.round((word.probability || 0) * 100)}%`;
+    token.classList.toggle("sung", word.end < second);
+    token.classList.toggle("active", word.start <= second && second <= word.end);
+    element.append(token);
+  });
+}
+
+function renderDeckLyrics(deck, track, second) {
+  if (!track) return;
+  const transcript = lyricState(track);
+  const meta = $(`#deck${deck}LyricMeta`);
+  const button = $(`#analyzeLyrics${deck}`);
+  const previous = $(`#deck${deck}LyricPrevious`);
+  const current = $(`#deck${deck}LyricCurrent`);
+  const next = $(`#deck${deck}LyricNext`);
+  const hint = $(`#deck${deck}LyricHint`);
+  $(`#deck${deck}LyricTime`).textContent = `${deck === "B" ? "CUE " : ""}${formatDeckTime(second)}`;
+  if (!transcript || transcript.status !== "ready") {
+    const working = ["queued", "working"].includes(transcript?.status);
+    meta.textContent = working
+      ? `${(transcript.stage || "QUEUED").toUpperCase()} · ${transcript.progress || 0}%`
+      : transcript?.status === "error" ? "ANALYSIS ERROR" : "NOT ANALYZED";
+    button.hidden = working;
+    button.textContent = transcript?.status === "error" ? "RETRY" : "ANALYZE";
+    previous.textContent = "—";
+    current.textContent = working ? (transcript.message || "Building timestamped machine transcript…") : "Run lyric analysis to expose words, phrases, and safe vocal boundaries.";
+    next.textContent = "—";
+    hint.textContent = working ? "AI PREPROCESSING RUNNING IN BACKGROUND" : "USED BY THE VOCAL HANDOFF PLANNER";
+    return;
+  }
+  button.hidden = true;
+  const phrases = transcript.phrases || [];
+  let index = phrases.findIndex(phrase => phrase.start <= second && second <= phrase.end);
+  if (index < 0) index = phrases.findIndex(phrase => phrase.end >= second);
+  if (index < 0) index = Math.max(0, phrases.length - 1);
+  const phrase = phrases[index];
+  previous.textContent = index > 0 ? phrases[index - 1].text : "—";
+  setTimestampedLyricLine(current, transcript, phrase, second);
+  next.textContent = index + 1 < phrases.length ? phrases[index + 1].text : "—";
+  const confidence = Math.round((transcript.confidence || 0) * 100);
+  meta.textContent = `${(transcript.language || "UNK").toUpperCase()} · ${confidence}% · ${phrases.length} LINES`;
+  if (deck === "A") {
+    const cleanExit = phrases.find(item => item.end >= second)?.end;
+    hint.textContent = cleanExit == null ? "NO LATER LYRIC BOUNDARY" : `NEXT LYRIC EXIT ${formatDeckTime(cleanExit)}`;
+  } else {
+    const entry = phrases.find(item => item.start >= second)?.start;
+    hint.textContent = entry == null ? "NO VOCAL ENTRY AFTER CUE" : `VOCAL ENTRY ${formatDeckTime(entry)} · +${Math.max(0, entry - second).toFixed(1)}S`;
+  }
 }
 
 function drawTechnicalWaveform(canvas, track, progress, palette) {
@@ -268,6 +404,10 @@ function updatePerformanceConsole() {
     : "VOCALS PENDING";
   loadWaveform(current);
   loadWaveform(next);
+  renderDeckLyrics("A", current, logicalSourceSeconds());
+  renderDeckLyrics("B", next, Math.max(0, Number(next.cueIn) || 0));
+  loadLyrics(current);
+  loadLyrics(next);
 
   const job = state.mixJob;
   const result = currentMixResult();
@@ -1108,6 +1248,12 @@ $("#forceMix").addEventListener("click", forceSmartMixNow);
 $("#connectController").addEventListener("click", connectController);
 $("#audioOutput").addEventListener("change", event => selectAudioOutput(event.target.value));
 $("#loopToggle").addEventListener("click", () => setLoopEnabled(!state.loop.enabled));
+$("#lyricsViewToggle").addEventListener("click", event => {
+  const expanded = $(".performance-console").classList.toggle("lyrics-expanded");
+  event.currentTarget.classList.toggle("active", expanded);
+});
+$("#analyzeLyricsA").addEventListener("click", () => analyzeLyrics(state.current));
+$("#analyzeLyricsB").addEventListener("click", () => analyzeLyrics(state.queued || state.suggestion));
 document.querySelectorAll("[data-beat-jump]").forEach(button => button.addEventListener("click", () => beatJump(button.dataset.beatJump)));
 $("#quantizeToggle").addEventListener("click", event => toggleDeckOption("quantize", event.currentTarget));
 $("#keyLockToggle").addEventListener("click", event => toggleDeckOption("keyLock", event.currentTarget));

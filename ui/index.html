@@ -74,7 +74,7 @@
         <div class="content">
           <section class="performance-console" aria-label="DJ performance workspace">
             <div class="console-toolbar">
-              <div class="console-tabs"><button class="active">2 DECK</button><button>STEMS</button><button>SAMPLER</button></div>
+              <div class="console-tabs"><button class="active">2 DECK</button><button>STEMS</button><button id="lyricsViewToggle">LYRICS</button></div>
               <div class="console-meters">
                 <span><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><b>MASTER</b></span>
                 <strong id="masterClock">00:00.000</strong>
@@ -110,6 +110,15 @@
                 <div class="performance-pads" id="hotCuePads">
                   <button data-hotcue="0"><b>1</b><span>HOT CUE</span></button><button data-hotcue="1"><b>2</b><span>HOT CUE</span></button><button data-hotcue="2"><b>3</b><span>HOT CUE</span></button><button data-hotcue="3"><b>4</b><span>HOT CUE</span></button>
                 </div>
+                <section class="deck-lyrics" id="deckALyrics" aria-label="Deck A machine transcript">
+                  <header><span><i></i>AI LYRICS · DECK A</span><b id="deckALyricMeta">CHECKING CACHE</b><button id="analyzeLyricsA">ANALYZE</button></header>
+                  <div class="lyric-context">
+                    <p class="previous" id="deckALyricPrevious">—</p>
+                    <p class="current" id="deckALyricCurrent">Timestamped vocal context will appear here.</p>
+                    <p class="next" id="deckALyricNext">—</p>
+                  </div>
+                  <footer><span id="deckALyricTime">00:00.000</span><b id="deckALyricHint">MACHINE TRANSCRIPT · VERIFY BEFORE PERFORMANCE</b></footer>
+                </section>
               </article>
 
               <section class="pro-mixer" aria-label="Mixer">
@@ -170,6 +179,15 @@
                 <div class="performance-pads suggestion-pads">
                   <button id="approveNext" class="approve"><b>✓</b><span>APPROVE</span></button><button id="rejectNext"><b>×</b><span>REJECT</span></button><button data-technique="stem_phrase"><b>S</b><span>STEM MIX</span></button><button id="forceMix"><b>↯</b><span>MIX NOW</span></button>
                 </div>
+                <section class="deck-lyrics secondary" id="deckBLyrics" aria-label="Deck B machine transcript">
+                  <header><span><i></i>AI LYRICS · DECK B</span><b id="deckBLyricMeta">CHECKING CACHE</b><button id="analyzeLyricsB">ANALYZE</button></header>
+                  <div class="lyric-context">
+                    <p class="previous" id="deckBLyricPrevious">—</p>
+                    <p class="current" id="deckBLyricCurrent">Incoming vocal context will appear here.</p>
+                    <p class="next" id="deckBLyricNext">—</p>
+                  </div>
+                  <footer><span id="deckBLyricTime">CUE 00:00.000</span><b id="deckBLyricHint">VOCAL ENTRY PENDING</b></footer>
+                </section>
               </article>
             </div>
 

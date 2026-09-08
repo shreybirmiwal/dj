@@ -26,6 +26,7 @@ CACHE_ROOT = Path(os.environ.get("SETMIX_CACHE_DIR", PROJECT_DIR / ".setmix-cach
 MIX_CACHE_DIR = CACHE_ROOT / "ui-mixes"
 MEDIA_CACHE_DIR = CACHE_ROOT / "ui-media"
 WAVEFORM_CACHE_DIR = CACHE_ROOT / "ui-waveforms"
+INTELLIGENCE_CACHE_DIR = CACHE_ROOT / "intelligence"
 MEDIA_CACHE_LOCK = threading.Lock()
 WAVEFORM_CACHE_LOCK = threading.Lock()
 if str(PROJECT_DIR) not in sys.path:
@@ -266,6 +267,139 @@ def waveform_summary(path: Path, *, bins: int = 900) -> dict:
         return payload
 
 
+def lyrics_summary(path: Path) -> dict:
+    """Return cached machine-transcribed lyrics without starting expensive work."""
+    resolved = str(path.expanduser().resolve())
+    candidates = sorted(
+        INTELLIGENCE_CACHE_DIR.glob("*/transcript.json"),
+        key=lambda item: item.stat().st_mtime_ns,
+        reverse=True,
+    )
+    for transcript_path in candidates:
+        try:
+            payload = json.loads(transcript_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("path") != resolved:
+            continue
+        phrases = [
+            {
+                "start": float(item["start"]),
+                "end": float(item["end"]),
+                "text": str(item["text"]).strip(),
+            }
+            for item in payload.get("phrases", [])
+            if str(item.get("text", "")).strip()
+        ]
+        words = [
+            {
+                "word": str(item["word"]).strip(),
+                "start": float(item["start"]),
+                "end": float(item["end"]),
+                "probability": float(item.get("probability", 0.0)),
+            }
+            for item in payload.get("words", [])
+            if str(item.get("word", "")).strip()
+        ]
+        return {
+            "status": "ready",
+            "model": str(payload.get("model", "unknown")),
+            "language": str(payload.get("language", "unknown")),
+            "confidence": float(payload.get("confidence", 0.0)),
+            "phrases": phrases,
+            "words": words,
+        }
+    return {
+        "status": "missing",
+        "model": None,
+        "language": None,
+        "confidence": 0.0,
+        "phrases": [],
+        "words": [],
+    }
+
+
+class LyricsManager:
+    """Run optional per-track stem separation and transcription in the background."""
+
+    def __init__(self) -> None:
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="setmix-lyrics")
+        self.lock = threading.Lock()
+        self.jobs: dict[str, dict] = {}
+
+    def create(self, track_id: str, path: Path, model: str) -> dict:
+        cached = lyrics_summary(path)
+        if cached["status"] == "ready":
+            return cached
+        with self.lock:
+            existing = self.jobs.get(track_id)
+            if existing and existing["status"] in {"queued", "working"}:
+                return dict(existing)
+            job = {
+                "status": "queued",
+                "stage": "queued",
+                "progress": 2,
+                "message": "Waiting for the lyric analysis engine",
+            }
+            self.jobs[track_id] = job
+        self.pool.submit(self._prepare, track_id, path, model)
+        return dict(job)
+
+    def _update(self, track_id: str, **values: object) -> None:
+        with self.lock:
+            self.jobs[track_id].update(values)
+
+    def _prepare(self, track_id: str, path: Path, model: str) -> None:
+        try:
+            from setmix.analysis import analyze_track
+            from setmix.intelligence import analyze_intelligence
+            from setmix.stems import analyze_vocals
+
+            self._update(
+                track_id,
+                status="working",
+                stage="stems",
+                progress=24,
+                message="Separating the vocal stem",
+            )
+            analysis = analyze_track(path, transition_bars=32)
+            vocals = analyze_vocals(path)
+            self._update(
+                track_id,
+                stage="words",
+                progress=55,
+                message="Transcribing word-level vocal timestamps",
+            )
+            analyze_intelligence(analysis, vocals, word_model=model)
+            result = lyrics_summary(path)
+            self._update(
+                track_id,
+                **{
+                    **result,
+                    "status": "ready",
+                    "stage": "ready",
+                    "progress": 100,
+                    "message": "Timestamped machine transcript ready",
+                },
+            )
+        except Exception as error:
+            self._update(
+                track_id,
+                status="error",
+                stage="error",
+                progress=0,
+                message=str(error),
+                error=type(error).__name__,
+            )
+
+    def get(self, track_id: str, path: Path) -> dict:
+        with self.lock:
+            job = self.jobs.get(track_id)
+            if job and job["status"] in {"queued", "working", "error"}:
+                return dict(job)
+        return lyrics_summary(path)
+
+
 class MixManager:
     """Prepare expensive two-track handoffs without blocking HTTP playback."""
 
@@ -474,6 +608,7 @@ class MixManager:
 
 
 MIX_MANAGER = MixManager()
+LYRICS_MANAGER = LyricsManager()
 
 
 class SetMixHandler(SimpleHTTPRequestHandler):
@@ -504,6 +639,14 @@ class SetMixHandler(SimpleHTTPRequestHandler):
                 self._send_json(waveform_summary(track["_path"]))
             except (OSError, ValueError, subprocess.CalledProcessError) as error:
                 self._send_json({"error": f"Could not analyze waveform: {error}"}, status=500)
+            return
+        if route.startswith("/api/lyrics/"):
+            track_id = route.removeprefix("/api/lyrics/")
+            track = next((item for item in self.catalog if item["id"] == track_id), None)
+            if not track:
+                self.send_error(404, "Track not found")
+                return
+            self._send_json(LYRICS_MANAGER.get(track_id, track["_path"]))
             return
         if route.startswith("/api/mixes/"):
             job_id = route.removeprefix("/api/mixes/")
@@ -536,6 +679,23 @@ class SetMixHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
+        if route.startswith("/api/lyrics/"):
+            track_id = route.removeprefix("/api/lyrics/")
+            track = next((item for item in self.catalog if item["id"] == track_id), None)
+            if not track:
+                self.send_error(404, "Track not found")
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                model = str(payload.get("wordModel", "base"))
+                if model not in {"tiny", "base", "small", "medium"}:
+                    raise ValueError("Unsupported word model")
+                result = LYRICS_MANAGER.create(track_id, track["_path"], model)
+                self._send_json(result, status=200 if result["status"] == "ready" else 202)
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                self._send_json({"error": str(error)}, status=400)
+            return
         if route != "/api/mixes":
             self.send_error(404)
             return
