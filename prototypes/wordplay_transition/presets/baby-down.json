@@ -1,0 +1,30 @@
+{
+  "left": "/Users/shreybirmiwal/Desktop/dj-music/ripped-monochrome/peak2/Disc 1/01 - Justin Bieber - Baby.flac",
+  "right": "/Users/shreybirmiwal/Desktop/dj-music/ripped-monochrome/peak2/Disc 1/01 - Jay Sean - Down.flac",
+  "output_slug": "baby-to-down",
+  "left_bpm": 129.2,
+  "right_bpm": 132.51,
+  "target_bpm": 130.0,
+  "left_context_start": 122.83,
+  "left_phrase_start": 134.54,
+  "left_phrase_end": 138.40,
+  "right_phrase_start": 62.84,
+  "post_seconds": 12.0,
+  "variants": {
+    "aligned-swap": {
+      "mode": "aligned_swap",
+      "loop_start": 135.70,
+      "loop_end": 138.40,
+      "loop_beats": 4,
+      "right_build_start": 49.95,
+      "right_word_start": 62.84
+    },
+    "hype-build": {
+      "loop_start": 134.54,
+      "loop_end": 138.40,
+      "pattern_beats": [4, 2, 1, 1, 0.5, 0.5],
+      "vacuum_beats": 1,
+      "riser": true
+    }
+  }
+}

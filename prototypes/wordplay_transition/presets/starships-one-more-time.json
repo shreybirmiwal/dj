@@ -1,0 +1,48 @@
+{
+  "left": "/Users/shreybirmiwal/Desktop/dj-music/ripped-monochrome/peak2/Disc 1/10 - Nicki Minaj - Starships.flac",
+  "right": "/Users/shreybirmiwal/Desktop/dj-music/ripped-monochrome/peak2/Disc 1/01 - Daft Punk - One More Time.flac",
+  "output_slug": "starships-to-one-more-time",
+  "left_bpm": 125.0,
+  "right_bpm": 123.0,
+  "target_bpm": 125.0,
+  "left_context_start": 161.15,
+  "left_phrase_start": 173.15,
+  "left_phrase_end": 177.19,
+  "right_phrase_start": 63.76,
+  "post_seconds": 12.0,
+  "variants": {
+    "aligned-swap": {
+      "mode": "aligned_swap",
+      "loop_start": 175.27,
+      "loop_end": 177.19,
+      "loop_beats": 4,
+      "right_build_start": 30.75,
+      "right_word_start": 46.35
+    },
+    "clean": {
+      "loop_start": 176.62,
+      "loop_end": 177.19,
+      "loop_beats": 0,
+      "repeats": 0
+    },
+    "phrase-loop": {
+      "loop_start": 175.27,
+      "loop_end": 177.19,
+      "loop_beats": 4,
+      "repeats": 2
+    },
+    "word-roll": {
+      "loop_start": 176.62,
+      "loop_end": 177.19,
+      "loop_beats": 1,
+      "repeats": 4
+    },
+    "hype-build": {
+      "loop_start": 175.27,
+      "loop_end": 177.19,
+      "pattern_beats": [4, 2, 1, 1, 0.5, 0.5],
+      "vacuum_beats": 1,
+      "riser": true
+    }
+  }
+}
