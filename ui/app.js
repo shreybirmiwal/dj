@@ -43,6 +43,7 @@ const audioSecondary = $("#audioSecondary");
 let currentAudio = audioPrimary;
 let transitioning = false;
 let joiningHandoff = false;
+let resumingCapsule = false;
 let mixRequestGeneration = 0;
 let audioGraph = null;
 let midiAccess = null;
@@ -51,6 +52,7 @@ const automationGains = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
 const midiMsb = new Map();
 const waveformCache = new Map();
 const waveformRequests = new Map();
+const waveformLayerCache = new Map();
 const lyricsCache = new Map();
 const lyricsRequests = new Map();
 const lyricsCheckedAt = new Map();
@@ -278,7 +280,8 @@ function renderDeckLyrics(deck, track, second) {
   setTimestampedLyricLine(current, transcript, phrase, second);
   next.textContent = index + 1 < phrases.length ? phrases[index + 1].text : "—";
   const confidence = Math.round((transcript.confidence || 0) * 100);
-  meta.textContent = `${(transcript.language || "UNK").toUpperCase()} · ${confidence}% · ${phrases.length} LINES`;
+  const source = transcript.source || transcript.model || "AI";
+  meta.textContent = `${String(source).toUpperCase()} · ${confidence}% · ${phrases.length} LINES`;
   if (deck === "A") {
     const cleanExit = phrases.find(item => item.end >= second)?.end;
     hint.textContent = cleanExit == null ? "NO LATER LYRIC BOUNDARY" : `NEXT LYRIC EXIT ${formatDeckTime(cleanExit)}`;
@@ -288,13 +291,8 @@ function renderDeckLyrics(deck, track, second) {
   }
 }
 
-function drawTechnicalWaveform(canvas, track, progress, palette) {
-  if (!canvas || !track) return;
-  const context = canvas.getContext("2d");
-  const { width, height } = canvas;
+function paintTechnicalWaveform(context, width, height, track, waveform, palette, played) {
   const center = height / 2;
-  const waveform = waveformCache.get(String(track.id));
-  context.clearRect(0, 0, width, height);
   context.fillStyle = "#06080b";
   context.fillRect(0, 0, width, height);
 
@@ -320,21 +318,9 @@ function drawTechnicalWaveform(canvas, track, progress, palette) {
     context.fillRect(x, 2, Math.max(1, segmentWidth), 5);
   }
 
-  if (!waveform?.bands?.length) {
-    context.fillStyle = "rgba(115,137,158,.38)";
-    context.fillRect(0, center - 1, width, 2);
-    context.font = "10px IBM Plex Mono";
-    context.fillStyle = "#68727e";
-    context.fillText("DECODING WAVEFORM…", 12, center - 10);
-    loadWaveform(track);
-    return;
-  }
-
   const bands = waveform.bands;
   const step = width / bands.length;
   for (let index = 0; index < bands.length; index += 1) {
-    const position = index / Math.max(1, bands.length - 1);
-    const played = position <= progress;
     const [low, mid, high] = bands[index];
     const components = [low, mid, high].map(value => Math.max(0.35, value * center * 2.75));
     let inner = 0;
@@ -363,6 +349,47 @@ function drawTechnicalWaveform(canvas, track, progress, palette) {
   marker(track.cueOut, "#ffad46", "MIX");
   if (track.id === state.current?.id) {
     readHotCues().forEach((seconds, index) => marker(seconds, "#cf6dff", `H${index + 1}`));
+  }
+}
+
+function waveformLayer(canvas, track, waveform, palette, played) {
+  const hotCues = track.id === state.current?.id ? JSON.stringify(readHotCues()) : "";
+  const key = [track.id, canvas.width, canvas.height, palette.join("-"), played, hotCues, waveform.bands.length, waveform.vocalSegments?.length || 0].join(":");
+  if (waveformLayerCache.has(key)) return waveformLayerCache.get(key);
+  const layer = document.createElement("canvas");
+  layer.width = canvas.width;
+  layer.height = canvas.height;
+  paintTechnicalWaveform(layer.getContext("2d"), layer.width, layer.height, track, waveform, palette, played);
+  waveformLayerCache.set(key, layer);
+  if (waveformLayerCache.size > 48) waveformLayerCache.delete(waveformLayerCache.keys().next().value);
+  return layer;
+}
+
+function drawTechnicalWaveform(canvas, track, progress, palette) {
+  if (!canvas || !track) return;
+  const context = canvas.getContext("2d");
+  const waveform = waveformCache.get(String(track.id));
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  if (!waveform?.bands?.length) {
+    context.fillStyle = "#06080b";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "rgba(115,137,158,.38)";
+    context.fillRect(0, canvas.height / 2 - 1, canvas.width, 2);
+    context.font = "10px IBM Plex Mono";
+    context.fillStyle = "#68727e";
+    context.fillText("DECODING WAVEFORM…", 12, canvas.height / 2 - 10);
+    loadWaveform(track);
+    return;
+  }
+  context.drawImage(waveformLayer(canvas, track, waveform, palette, false), 0, 0);
+  const playedWidth = Math.round(Math.max(0, Math.min(1, progress)) * canvas.width);
+  if (playedWidth > 0) {
+    context.save();
+    context.beginPath();
+    context.rect(0, 0, playedWidth, canvas.height);
+    context.clip();
+    context.drawImage(waveformLayer(canvas, track, waveform, palette, true), 0, 0);
+    context.restore();
   }
 }
 
@@ -593,6 +620,7 @@ function renderCurrentTrack(track, { preserveQueue = false } = {}) {
   $("#currentEnergy").outerHTML = energyBars(track.energy).replace('<span class="energy-bars"', '<strong class="energy-bars" id="currentEnergy"').replace('</span>', '</strong>');
   const next = bestNextTrack(track, previous?.id);
   setSuggestion(next);
+  prefetchLikelyNext(track);
   makeWaveform();
   renderRows();
 }
@@ -603,6 +631,9 @@ function loadAudio(track, audio = currentAudio) {
     audio.src = track.mediaUrl;
     audio.load();
   }
+  const rate = state.masterBpm && track.bpm ? state.masterBpm / track.bpm : 1;
+  audio.playbackRate = Math.max(0.5, Math.min(2, rate));
+  audio.preservesPitch = true;
 }
 
 function setPlaybackState(playing, label) {
@@ -828,6 +859,7 @@ async function maybeJoinPreparedHandoff() {
   const incoming = currentAudio === audioPrimary ? audioSecondary : audioPrimary;
   try {
     incoming.src = result.mediaUrl;
+    incoming.playbackRate = 1;
     incoming.load();
     await waitForMetadata(incoming);
     incoming.currentTime = Math.max(0, stretchedPosition - result.handoff_start);
@@ -876,8 +908,59 @@ function promoteIncomingTrack() {
   active.promoted = true;
   renderCurrentTrack(active.nextTrack);
   state.elapsed = logicalSourceSeconds();
+  if (active.result.capsule) {
+    const liveDeck = currentAudio === audioPrimary ? audioSecondary : audioPrimary;
+    loadAudio(active.nextTrack, liveDeck);
+  }
   setPlaybackState(true, "Continuous smart output");
   prepareSmartMix(state.suggestion);
+}
+
+async function resumeOriginalAfterCapsule(force = false) {
+  const active = state.activeHandoff;
+  if (!active?.promoted || !active.result.capsule || resumingCapsule) return;
+  const remaining = Math.max(0, Number(active.result.duration || currentAudio.duration) - currentAudio.currentTime);
+  if (!force && remaining > 0.65) return;
+  resumingCapsule = true;
+  const capsule = currentAudio;
+  const live = currentAudio === audioPrimary ? audioSecondary : audioPrimary;
+  try {
+    loadAudio(active.nextTrack, live);
+    await waitForMetadata(live);
+    const sourceSecond = logicalSourceSeconds();
+    live.currentTime = Math.max(0, Math.min(sourceSecond, live.duration || sourceSecond));
+    setAutomationGain(live, 0);
+    await live.play();
+    const started = performance.now();
+    const fade = (now) => {
+      if (!state.playing) {
+        live.pause();
+        resumingCapsule = false;
+        return;
+      }
+      const position = Math.min(1, (now - started) / (JOIN_FADE_SECONDS * 1000));
+      setAutomationGain(capsule, Math.cos(position * Math.PI / 2));
+      setAutomationGain(live, Math.sin(position * Math.PI / 2));
+      if (position < 1 && !capsule.ended) {
+        requestAnimationFrame(fade);
+        return;
+      }
+      capsule.pause();
+      currentAudio = live;
+      setAutomationGain(capsule, 0);
+      setAutomationGain(live, 1);
+      state.activeHandoff = null;
+      state.elapsed = live.currentTime;
+      resumingCapsule = false;
+      setPlaybackState(true, "Continuous live deck output");
+      updateProgress();
+    };
+    requestAnimationFrame(fade);
+  } catch (error) {
+    resumingCapsule = false;
+    console.error(error);
+    setPlaybackState(false, "Could not resume the live incoming deck");
+  }
 }
 
 async function playNextImmediately() {
@@ -1362,17 +1445,33 @@ setInterval(() => {
   if (active && !active.promoted && currentAudio.currentTime >= active.result.incoming_offset) {
     promoteIncomingTrack();
   }
+  resumeOriginalAfterCapsule();
   updateProgress();
 }, 1000);
 
 setInterval(pollNativeController, 3000);
 
-audioPrimary.addEventListener("ended", () => { if (currentAudio === audioPrimary) playNextImmediately(); });
-audioSecondary.addEventListener("ended", () => { if (currentAudio === audioSecondary) playNextImmediately(); });
+function handleAudioEnded(audio) {
+  if (currentAudio !== audio) return;
+  if (state.activeHandoff?.promoted && state.activeHandoff.result.capsule) {
+    resumeOriginalAfterCapsule(true);
+    return;
+  }
+  playNextImmediately();
+}
+
+audioPrimary.addEventListener("timeupdate", () => { if (currentAudio === audioPrimary) resumeOriginalAfterCapsule(); });
+audioSecondary.addEventListener("timeupdate", () => { if (currentAudio === audioSecondary) resumeOriginalAfterCapsule(); });
+audioPrimary.addEventListener("ended", () => handleAudioEnded(audioPrimary));
+audioSecondary.addEventListener("ended", () => handleAudioEnded(audioSecondary));
 
 window.addEventListener("resize", makeWaveform);
 
 function bestNextTrack(current, excludedId = null) {
+  return likelyNextTracks(current, excludedId, 1)[0];
+}
+
+function likelyNextTracks(current, excludedId = null, limit = 3) {
   const currentIdentity = `${current.title}|${current.artist}`.toLowerCase();
   const options = tracks.filter(track =>
     track.id !== current.id &&
@@ -1383,7 +1482,21 @@ function bestNextTrack(current, excludedId = null) {
     const leftDistance = current.bpm && left.bpm ? Math.abs(current.bpm - left.bpm) : 999;
     const rightDistance = current.bpm && right.bpm ? Math.abs(current.bpm - right.bpm) : 999;
     return leftDistance - rightDistance || right.match - left.match;
-  })[0] || options[0];
+  }).slice(0, limit);
+}
+
+function prefetchLikelyNext(current) {
+  if (!current) return;
+  const candidates = likelyNextTracks(current, null, 3);
+  candidates.forEach(track => {
+    loadWaveform(track);
+    loadLyrics(track);
+  });
+  fetch("/api/prefetch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fromId: current.id, trackIds: candidates.map(track => track.id) }),
+  }).catch(error => console.debug("prefetch unavailable", error));
 }
 
 function renderFilters() {
@@ -1438,6 +1551,7 @@ async function loadCatalog() {
     $("#currentEnergy").outerHTML = energyBars(firstAnalyzed.energy).replace('<span class="energy-bars"', '<strong class="energy-bars" id="currentEnergy"').replace('</span>', '</strong>');
     const next = bestNextTrack(firstAnalyzed);
     setSuggestion(next);
+    prefetchLikelyNext(firstAnalyzed);
     loadAudio(firstAnalyzed);
     setPlaybackState(false, "Ready to play");
     makeWaveform();

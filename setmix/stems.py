@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -11,6 +12,9 @@ import librosa
 import numpy as np
 
 from .analysis import TrackAnalysis
+
+
+STEM_CACHE_LOCK = threading.RLock()
 
 
 @dataclass(frozen=True)
@@ -84,28 +88,35 @@ def separate_stems(
         result = {name: folder / f"{name}.mp3" for name in ("vocals", "drums", "bass", "other")}
         if all(item.exists() for item in result.values()):
             return result
-    root.mkdir(parents=True, exist_ok=True)
-    command = [
-        sys.executable,
-        "-m",
-        "demucs.separate",
-        "--mp3",
-        "--mp3-bitrate",
-        "320",
-        "-n",
-        "htdemucs",
-        "-d",
-        _resolve_device(device),
-        "-o",
-        str(root),
-        str(source),
-    ]
-    try:
-        subprocess.run(command, check=True)
-    except (subprocess.CalledProcessError, ModuleNotFoundError) as error:
-        raise RuntimeError(
-            "Four-stem mixing requires the optional stem dependencies from requirements-stems.txt"
-        ) from error
+    with STEM_CACHE_LOCK:
+        candidates = list(model_root.glob("*/vocals.mp3"))
+        if candidates:
+            folder = candidates[0].parent
+            result = {name: folder / f"{name}.mp3" for name in ("vocals", "drums", "bass", "other")}
+            if all(item.exists() for item in result.values()):
+                return result
+        root.mkdir(parents=True, exist_ok=True)
+        command = [
+            sys.executable,
+            "-m",
+            "demucs.separate",
+            "--mp3",
+            "--mp3-bitrate",
+            "320",
+            "-n",
+            "htdemucs",
+            "-d",
+            _resolve_device(device),
+            "-o",
+            str(root),
+            str(source),
+        ]
+        try:
+            subprocess.run(command, check=True)
+        except (subprocess.CalledProcessError, ModuleNotFoundError) as error:
+            raise RuntimeError(
+                "Four-stem mixing requires the optional stem dependencies from requirements-stems.txt"
+            ) from error
     candidates = list(model_root.glob("*/vocals.mp3"))
     if not candidates:
         raise RuntimeError(f"Stem separation did not produce expected outputs for {source}")
@@ -126,35 +137,42 @@ def separate_vocals(
     root, vocals, accompaniment = _stem_paths(source, Path(cache_dir))
     if vocals.exists() and accompaniment.exists():
         return vocals, accompaniment
-    root.mkdir(parents=True, exist_ok=True)
-    selected_device = _resolve_device(device)
-    command = [
-        sys.executable,
-        "-m",
-        "demucs.separate",
-        "--two-stems",
-        "vocals",
-        "--mp3",
-        "--mp3-bitrate",
-        "320",
-        "-n",
-        "htdemucs",
-        "-d",
-        selected_device,
-        "-o",
-        str(root),
-        str(source),
-    ]
-    try:
-        subprocess.run(command, check=True)
-    except (subprocess.CalledProcessError, ModuleNotFoundError) as error:
-        raise RuntimeError(
-            "Vocal analysis requires the optional stem dependencies from requirements-stems.txt"
-        ) from error
-    _, vocals, accompaniment = _stem_paths(source, Path(cache_dir))
-    if not vocals.exists() or not accompaniment.exists():
-        raise RuntimeError(f"Stem separation did not produce expected outputs for {source}")
-    return vocals, accompaniment
+
+    # Demucs' two-stem mode still runs the full separator internally. Keep old
+    # two-stem caches readable, but create all new vocal data from one reusable
+    # four-stem pass so rendering does not perform the same inference twice.
+    four_stem_root = Path(cache_dir).expanduser().parent / "stems4"
+    stems = separate_stems(source, cache_dir=four_stem_root, device=device)
+    accompaniment = stems["vocals"].with_name("no_vocals.mp3")
+    if not accompaniment.exists():
+        with STEM_CACHE_LOCK:
+            if not accompaniment.exists():
+                temporary = accompaniment.with_suffix(".partial.mp3")
+                command = [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(stems["drums"]),
+                    "-i",
+                    str(stems["bass"]),
+                    "-i",
+                    str(stems["other"]),
+                    "-filter_complex",
+                    "amix=inputs=3:duration=longest:normalize=0,alimiter=limit=0.95",
+                    "-c:a",
+                    "libmp3lame",
+                    "-b:a",
+                    "320k",
+                    str(temporary),
+                ]
+                try:
+                    subprocess.run(command, check=True)
+                    temporary.replace(accompaniment)
+                finally:
+                    temporary.unlink(missing_ok=True)
+    return stems["vocals"], accompaniment
 
 
 def _segments(active: np.ndarray, resolution: float) -> list[list[float]]:

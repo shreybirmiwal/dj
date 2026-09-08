@@ -8,11 +8,13 @@ browser is involved.
 ## Processing model
 
 - Library metadata and cached analysis appear immediately.
-- Selecting the next track starts the full CLI-equivalent preparation job:
-  analysis, stems, word timing, candidate ranking, alignment, and render.
+- Likely next tracks are analyzed in the background; the top candidate also warms
+  its reusable four-stem separation.
+- Selecting the next track starts the remaining CLI-equivalent preparation job:
+  LRCLIB/local lyric timing, candidate ranking, alignment, and capsule render.
 - The current track keeps playing while that work runs.
-- A completed handoff is joined at its selected phrase; the rendered incoming
-  song becomes the continuous source and the next preparation can begin.
+- A completed handoff is joined at its selected phrase; after a short rendered
+  post-roll, playback returns to the tempo-synchronized live incoming deck.
 - Existing `.setmix-cache` assets are reused when running from the checkout.
 
 ## Hardware status

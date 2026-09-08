@@ -5,6 +5,7 @@ description = "Text-first, beat-aligned DJ mix planner and renderer"
 requires-python = ">=3.11"
 dependencies = [
   "librosa==0.10.2.post1",
+  "mutagen>=1.47,<2",
   "numpy==1.26.4",
   "scipy==1.12.0",
   "soundfile==0.12.1",

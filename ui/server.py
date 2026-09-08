@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import mimetypes
@@ -16,7 +17,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
 
 
 AUDIO_SUFFIXES = {".aif", ".aiff", ".flac", ".m4a", ".mp3", ".wav"}
@@ -27,8 +30,12 @@ MIX_CACHE_DIR = CACHE_ROOT / "ui-mixes"
 MEDIA_CACHE_DIR = CACHE_ROOT / "ui-media"
 WAVEFORM_CACHE_DIR = CACHE_ROOT / "ui-waveforms"
 INTELLIGENCE_CACHE_DIR = CACHE_ROOT / "intelligence"
+LRCLIB_CACHE_DIR = CACHE_ROOT / "lyrics-lrclib"
 MEDIA_CACHE_LOCK = threading.Lock()
 WAVEFORM_CACHE_LOCK = threading.Lock()
+LRCLIB_LOCK = threading.Lock()
+LRCLIB_USER_AGENT = "SetMix/0.1.0 (https://github.com/shreybirmiwal/dj)"
+_lrclib_last_request = 0.0
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
@@ -94,6 +101,7 @@ def build_catalog(music_dir: Path) -> list[dict]:
         fallback_title, fallback_artist = _filename_metadata(path)
         title, artist = fallback_title, fallback_artist
         genre = None
+        album = None
         duration = 0.0
         tagged_bpm: float | None = None
         if mutagen:
@@ -103,6 +111,7 @@ def build_catalog(music_dir: Path) -> list[dict]:
                     title = _text_tag(audio.tags, "title") or title
                     artist = _text_tag(audio.tags, "artist", "albumartist") or artist
                     genre = _text_tag(audio.tags, "genre")
+                    album = _text_tag(audio.tags, "album")
                     duration = float(getattr(audio.info, "length", 0.0) or 0.0)
                     bpm_value = _text_tag(audio.tags, "bpm")
                     if bpm_value:
@@ -127,6 +136,7 @@ def build_catalog(music_dir: Path) -> list[dict]:
                 "id": track_id,
                 "title": title,
                 "artist": artist,
+                "album": album,
                 "bpm": bpm,
                 "key": musical_key if musical_key and musical_key != "unknown" else None,
                 "camelot": camelot if camelot and camelot != "unknown" else None,
@@ -206,7 +216,7 @@ def waveform_summary(path: Path, *, bins: int = 900) -> dict:
 
     stat = path.stat()
     fingerprint = hashlib.sha256(
-        f"waveform-v2:{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{bins}".encode()
+        f"waveform-v3:{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{bins}".encode()
     ).hexdigest()[:24]
     output = WAVEFORM_CACHE_DIR / f"{fingerprint}.json"
     if output.exists():
@@ -215,16 +225,9 @@ def waveform_summary(path: Path, *, bins: int = 900) -> dict:
     with WAVEFORM_CACHE_LOCK:
         if output.exists():
             return json.loads(output.read_text())
-        sample_rate = 12000
-        decoded = subprocess.run(
-            [
-                "ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1",
-                "-ar", str(sample_rate), "-f", "f32le", "pipe:1",
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-        ).stdout
-        samples = np.frombuffer(decoded, dtype="<f4")
+        from setmix.analysis import load_analysis_audio
+
+        samples, sample_rate = load_analysis_audio(path)
         if samples.size == 0:
             raise ValueError(f"No waveform samples decoded from {path}")
 
@@ -267,9 +270,154 @@ def waveform_summary(path: Path, *, bins: int = 900) -> dict:
         return payload
 
 
+def _lrclib_cache_path(path: Path) -> Path:
+    source = path.expanduser().resolve()
+    stat = source.stat()
+    fingerprint = hashlib.sha256(
+        f"lrclib-v1:{source}:{stat.st_size}:{stat.st_mtime_ns}".encode()
+    ).hexdigest()[:24]
+    return LRCLIB_CACHE_DIR / f"{fingerprint}.json"
+
+
+def _parse_synced_lyrics(value: str) -> list[dict]:
+    parsed: list[tuple[float, str]] = []
+    timestamp = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]")
+    for line in value.splitlines():
+        matches = list(timestamp.finditer(line))
+        text = timestamp.sub("", line).strip()
+        if not text:
+            continue
+        for match in matches:
+            parsed.append((int(match.group(1)) * 60 + float(match.group(2)), text))
+    parsed.sort(key=lambda item: item[0])
+    return [
+        {
+            "start": round(start, 3),
+            "end": round(max(start + 0.25, parsed[index + 1][0] if index + 1 < len(parsed) else start + 5.0), 3),
+            "text": text,
+        }
+        for index, (start, text) in enumerate(parsed)
+    ]
+
+
+def _lrclib_request(endpoint: str, parameters: dict[str, object]) -> object:
+    global _lrclib_last_request
+    with LRCLIB_LOCK:
+        url = f"https://lrclib.net{endpoint}?{urlencode(parameters)}"
+        request = Request(url, headers={"User-Agent": LRCLIB_USER_AGENT, "Accept": "application/json"})
+        for attempt in range(2):
+            wait = 0.25 - (time.monotonic() - _lrclib_last_request)
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                with urlopen(request, timeout=8) as response:  # noqa: S310 - fixed trusted API host
+                    return json.loads(response.read())
+            except HTTPError as error:
+                if error.code != 429 or attempt:
+                    raise
+                retry_after = max(0.0, float(error.headers.get("Retry-After", "1")))
+                time.sleep(retry_after)
+            finally:
+                _lrclib_last_request = time.monotonic()
+        raise RuntimeError("LRCLIB retry exhausted")
+
+
+def _lrclib_match(metadata: dict, records: list[dict]) -> dict | None:
+    title = str(metadata.get("title") or "").casefold()
+    artist = str(metadata.get("artist") or "").casefold()
+    duration = float(metadata.get("length") or 0)
+
+    def score(record: dict) -> float:
+        if not record.get("syncedLyrics"):
+            return -1000.0
+        result = 4.0 * difflib.SequenceMatcher(None, title, str(record.get("trackName", "")).casefold()).ratio()
+        result += 3.0 * difflib.SequenceMatcher(None, artist, str(record.get("artistName", "")).casefold()).ratio()
+        if duration and record.get("duration"):
+            result -= min(6.0, abs(duration - float(record["duration"])) / 2.0)
+        return result
+
+    if not records:
+        return None
+    best = max(records, key=score)
+    title_match = difflib.SequenceMatcher(None, title, str(best.get("trackName", "")).casefold()).ratio()
+    artist_match = difflib.SequenceMatcher(None, artist, str(best.get("artistName", "")).casefold()).ratio()
+    duration_gap = abs(duration - float(best.get("duration") or duration)) if duration else 0.0
+    if not best.get("syncedLyrics") or title_match < 0.72 or artist_match < 0.62 or duration_gap > 15.0:
+        return None
+    return best
+
+
+def fetch_lrclib_lyrics(path: Path, metadata: dict, *, force: bool = False) -> dict | None:
+    """Fetch and cache synchronized LRCLIB lines for one local track."""
+    output = _lrclib_cache_path(path)
+    if output.exists() and not force:
+        payload = json.loads(output.read_text())
+        return payload if payload.get("status") == "ready" else None
+    title = str(metadata.get("title") or "").strip()
+    artist = str(metadata.get("artist") or "").strip()
+    if not title or not artist or artist.casefold() == "unknown artist":
+        return None
+    record: dict | None = None
+    parameters: dict[str, object] = {"track_name": title, "artist_name": artist}
+    if metadata.get("album"):
+        parameters["album_name"] = metadata["album"]
+    if metadata.get("length"):
+        parameters["duration"] = int(round(float(metadata["length"])))
+    try:
+        try:
+            exact = _lrclib_request("/api/get", parameters)
+            record = exact if isinstance(exact, dict) else None
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+        if not record or not record.get("syncedLyrics"):
+            searched = _lrclib_request(
+                "/api/search",
+                {"track_name": title, "artist_name": artist},
+            )
+            if isinstance(searched, list):
+                record = _lrclib_match(metadata, searched)
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+    phrases = _parse_synced_lyrics(str((record or {}).get("syncedLyrics") or ""))
+    if not phrases:
+        LRCLIB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps({"status": "missing", "path": str(path.resolve())}) + "\n")
+        return None
+    payload = {
+        "status": "ready",
+        "source": "LRCLIB",
+        "model": f"lrclib/{record.get('id', 'match')}",
+        "language": "unknown",
+        "confidence": 0.99,
+        "phrases": phrases,
+        "words": [],
+        "path": str(path.resolve()),
+        "provider": {
+            "id": record.get("id"),
+            "trackName": record.get("trackName"),
+            "artistName": record.get("artistName"),
+            "albumName": record.get("albumName"),
+        },
+    }
+    LRCLIB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    temporary.replace(output)
+    return payload
+
+
 def lyrics_summary(path: Path) -> dict:
     """Return cached machine-transcribed lyrics without starting expensive work."""
     resolved = str(path.expanduser().resolve())
+    provider_cache = _lrclib_cache_path(path)
+    if provider_cache.exists():
+        try:
+            provider = json.loads(provider_cache.read_text())
+            if provider.get("status") == "ready" and provider.get("path") == resolved:
+                return provider
+        except (OSError, json.JSONDecodeError):
+            pass
     candidates = sorted(
         INTELLIGENCE_CACHE_DIR.glob("*/transcript.json"),
         key=lambda item: item.stat().st_mtime_ns,
@@ -303,6 +451,7 @@ def lyrics_summary(path: Path) -> dict:
         ]
         return {
             "status": "ready",
+            "source": "LOCAL AI",
             "model": str(payload.get("model", "unknown")),
             "language": str(payload.get("language", "unknown")),
             "confidence": float(payload.get("confidence", 0.0)),
@@ -327,7 +476,15 @@ class LyricsManager:
         self.lock = threading.Lock()
         self.jobs: dict[str, dict] = {}
 
-    def create(self, track_id: str, path: Path, model: str) -> dict:
+    def create(
+        self,
+        track_id: str,
+        path: Path,
+        model: str,
+        metadata: dict,
+        *,
+        provider_only: bool = False,
+    ) -> dict:
         cached = lyrics_summary(path)
         if cached["status"] == "ready":
             return cached
@@ -342,32 +499,67 @@ class LyricsManager:
                 "message": "Waiting for the lyric analysis engine",
             }
             self.jobs[track_id] = job
-        self.pool.submit(self._prepare, track_id, path, model)
+        self.pool.submit(self._prepare, track_id, path, model, metadata, provider_only)
         return dict(job)
 
     def _update(self, track_id: str, **values: object) -> None:
         with self.lock:
             self.jobs[track_id].update(values)
 
-    def _prepare(self, track_id: str, path: Path, model: str) -> None:
+    def _prepare(
+        self,
+        track_id: str,
+        path: Path,
+        model: str,
+        metadata: dict,
+        provider_only: bool,
+    ) -> None:
         try:
             from setmix.analysis import analyze_track
             from setmix.intelligence import analyze_intelligence
-            from setmix.stems import analyze_vocals
+            from setmix.stems import analyze_vocals, separate_stems
 
             self._update(
                 track_id,
                 status="working",
+                stage="lrclib",
+                progress=15,
+                message="Checking LRCLIB for synchronized lyrics",
+            )
+            provider = fetch_lrclib_lyrics(path, metadata)
+            if provider:
+                self._update(
+                    track_id,
+                    **{
+                        **provider,
+                        "status": "ready",
+                        "stage": "ready",
+                        "progress": 100,
+                        "message": "Synchronized LRCLIB lyrics ready",
+                    },
+                )
+                return
+            if provider_only:
+                self._update(
+                    track_id,
+                    status="missing",
+                    stage="provider-miss",
+                    progress=100,
+                    message="No synchronized LRCLIB match",
+                )
+                return
+            self._update(
+                track_id,
                 stage="stems",
-                progress=24,
-                message="Separating the vocal stem",
+                progress=30,
+                message="LRCLIB unavailable; separating vocals for local timing",
             )
             analysis = analyze_track(path, transition_bars=32)
             vocals = analyze_vocals(path)
             self._update(
                 track_id,
                 stage="words",
-                progress=55,
+                progress=62,
                 message="Transcribing word-level vocal timestamps",
             )
             analyze_intelligence(analysis, vocals, word_model=model)
@@ -379,7 +571,7 @@ class LyricsManager:
                     "status": "ready",
                     "stage": "ready",
                     "progress": 100,
-                    "message": "Timestamped machine transcript ready",
+                    "message": "Timestamped local transcript ready",
                 },
             )
         except Exception as error:
@@ -418,7 +610,7 @@ class MixManager:
                 "left": [str(left), left_stat.st_size, left_stat.st_mtime_ns],
                 "right": [str(right), right_stat.st_size, right_stat.st_mtime_ns],
                 "options": options,
-                "version": 2,
+                "version": 3,
             },
             sort_keys=True,
         )
@@ -488,7 +680,13 @@ class MixManager:
     def _prepare(self, job_id: str, left: Path, right: Path, options: dict) -> None:
         try:
             from setmix.engine import analyze_ordered, create_plan, render_pair_handoff
-            from setmix.intelligence import analyze_intelligence
+            from setmix.intelligence import (
+                LyricPhrase,
+                TrackIntelligence,
+                VocalTranscript,
+                analyze_intelligence,
+                analyze_sections,
+            )
             from setmix.stems import analyze_vocals
 
             def analysis_progress(message: str) -> None:
@@ -517,17 +715,36 @@ class MixManager:
             self._update(
                 job_id,
                 stage="intelligence",
-                message="Detecting sections and word-level vocal boundaries",
+                message="Detecting sections and synchronized lyric boundaries",
                 progress=48,
             )
-            intelligence = {
-                analysis.path: analyze_intelligence(
-                    analysis,
-                    vocal_maps[analysis.path],
-                    word_model=options["wordModel"],
-                )
-                for analysis in analyses
+            intelligence: dict[str, TrackIntelligence] = {}
+            metadata_by_id = {
+                item["id"]: item for item in options.get("trackMetadata", [])
             }
+            for analysis, track_id in zip(analyses, (options["fromId"], options["toId"])):
+                metadata = metadata_by_id.get(track_id, {})
+                provider = fetch_lrclib_lyrics(Path(analysis.path), metadata)
+                if provider:
+                    transcript = VocalTranscript(
+                        path=analysis.path,
+                        model=str(provider["model"]),
+                        language=str(provider.get("language", "unknown")),
+                        words=[],
+                        phrases=[LyricPhrase(**item) for item in provider["phrases"]],
+                        confidence=float(provider.get("confidence", 0.99)),
+                    )
+                    intelligence[analysis.path] = TrackIntelligence(
+                        path=analysis.path,
+                        sections=analyze_sections(analysis, vocal_maps[analysis.path]),
+                        transcript=transcript,
+                    )
+                else:
+                    intelligence[analysis.path] = analyze_intelligence(
+                        analysis,
+                        vocal_maps[analysis.path],
+                        word_model=options["wordModel"],
+                    )
             self._update(
                 job_id,
                 stage="planning",
@@ -607,8 +824,54 @@ class MixManager:
             return job["output"]
 
 
+class PrefetchManager:
+    """Warm likely next-track caches without blocking the interactive request."""
+
+    def __init__(self) -> None:
+        self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="setmix-prefetch")
+        self.lock = threading.Lock()
+        self.jobs: dict[str, str] = {}
+
+    def create(self, tracks: list[dict]) -> dict:
+        scheduled: list[str] = []
+        for index, track in enumerate(tracks[:3]):
+            path = track["_path"]
+            stat = path.stat()
+            key = hashlib.sha256(
+                f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:prefetch-v1".encode()
+            ).hexdigest()[:24]
+            with self.lock:
+                if self.jobs.get(key) in {"queued", "working", "ready"}:
+                    continue
+                self.jobs[key] = "queued"
+            self.pool.submit(self._prepare, key, path, index == 0)
+            scheduled.append(track["id"])
+        return {"status": "accepted", "scheduled": scheduled}
+
+    def _prepare(self, key: str, path: Path, warm_stems: bool) -> None:
+        try:
+            from setmix.analysis import analyze_track
+            from setmix.intelligence import analyze_intelligence
+            from setmix.stems import analyze_vocals
+
+            with self.lock:
+                self.jobs[key] = "working"
+            analysis = analyze_track(path, transition_bars=32)
+            waveform_summary(path)
+            if warm_stems:
+                separate_stems(path)
+                vocals = analyze_vocals(path)
+                analyze_intelligence(analysis, vocals, transcribe=False)
+            with self.lock:
+                self.jobs[key] = "ready"
+        except Exception:
+            with self.lock:
+                self.jobs[key] = "error"
+
+
 MIX_MANAGER = MixManager()
 LYRICS_MANAGER = LyricsManager()
+PREFETCH_MANAGER = PrefetchManager()
 
 
 class SetMixHandler(SimpleHTTPRequestHandler):
@@ -679,6 +942,24 @@ class SetMixHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
+        if route == "/api/prefetch":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                ids = [str(value) for value in payload.get("trackIds", [])][:3]
+                candidates = [item for track_id in ids for item in self.catalog if item["id"] == track_id]
+                for track in candidates:
+                    LYRICS_MANAGER.create(
+                        track["id"],
+                        track["_path"],
+                        "base",
+                        track,
+                        provider_only=True,
+                    )
+                self._send_json(PREFETCH_MANAGER.create(candidates), status=202)
+            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                self._send_json({"error": str(error)}, status=400)
+            return
         if route.startswith("/api/lyrics/"):
             track_id = route.removeprefix("/api/lyrics/")
             track = next((item for item in self.catalog if item["id"] == track_id), None)
@@ -691,7 +972,7 @@ class SetMixHandler(SimpleHTTPRequestHandler):
                 model = str(payload.get("wordModel", "base"))
                 if model not in {"tiny", "base", "small", "medium"}:
                     raise ValueError("Unsupported word model")
-                result = LYRICS_MANAGER.create(track_id, track["_path"], model)
+                result = LYRICS_MANAGER.create(track_id, track["_path"], model, track)
                 self._send_json(result, status=200 if result["status"] == "ready" else 202)
             except (TypeError, ValueError, json.JSONDecodeError) as error:
                 self._send_json({"error": str(error)}, status=400)
@@ -723,6 +1004,16 @@ class SetMixHandler(SimpleHTTPRequestHandler):
                 "wordModel": str(payload.get("wordModel", "base")),
                 "targetBpm": target_bpm,
                 "preRoll": 8.0,
+                "trackMetadata": [
+                    {
+                        "id": item["id"],
+                        "title": item["title"],
+                        "artist": item["artist"],
+                        "album": item.get("album"),
+                        "length": item.get("length"),
+                    }
+                    for item in (left, right)
+                ],
             }
             job = MIX_MANAGER.create(left["_path"], right["_path"], options)
             self._send_json(job, status=202 if job["status"] != "ready" else 200)

@@ -9,7 +9,7 @@ from pathlib import Path
 import librosa
 import numpy as np
 
-from .analysis import TrackAnalysis
+from .analysis import TrackAnalysis, load_analysis_audio
 from .stems import VocalMap, separate_vocals
 
 
@@ -164,7 +164,7 @@ def analyze_sections(
     if manifest.exists() and not force:
         return [SectionSpan(**item) for item in json.loads(manifest.read_text())]
 
-    y, sr = librosa.load(source, sr=22050, mono=True)
+    y, sr = load_analysis_audio(source)
     hop = 512
     rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0]
     centroid = librosa.feature.spectral_centroid(y=y, sr=sr, n_fft=2048, hop_length=hop)[0]

@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import threading
+from collections import OrderedDict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -12,6 +15,38 @@ import numpy as np
 
 
 AUDIO_SUFFIXES = {".aif", ".aiff", ".flac", ".m4a", ".mp3", ".wav"}
+ANALYSIS_SAMPLE_RATE = 22050
+_DECODE_CACHE_LIMIT = max(1, int(os.environ.get("SETMIX_DECODE_CACHE_TRACKS", "4")))
+_DECODE_CACHE: OrderedDict[str, tuple[tuple[int, int], np.ndarray]] = OrderedDict()
+_DECODE_CACHE_LOCK = threading.RLock()
+
+
+def load_analysis_audio(path: str | Path) -> tuple[np.ndarray, int]:
+    """Decode once and share the mono analysis signal across hot-path consumers.
+
+    The small in-memory LRU avoids repeated full-track decoding by beat analysis,
+    section analysis, and waveform generation without creating another large disk
+    cache. Returned arrays are read-only so concurrent consumers cannot corrupt a
+    later analysis.
+    """
+    source = Path(path).expanduser().resolve()
+    stat = source.stat()
+    revision = (stat.st_size, stat.st_mtime_ns)
+    key = str(source)
+    with _DECODE_CACHE_LOCK:
+        cached = _DECODE_CACHE.get(key)
+        if cached and cached[0] == revision:
+            _DECODE_CACHE.move_to_end(key)
+            return cached[1], ANALYSIS_SAMPLE_RATE
+
+        audio, _ = librosa.load(source, sr=ANALYSIS_SAMPLE_RATE, mono=True)
+        audio = np.asarray(audio, dtype=np.float32)
+        audio.setflags(write=False)
+        _DECODE_CACHE[key] = (revision, audio)
+        _DECODE_CACHE.move_to_end(key)
+        while len(_DECODE_CACHE) > _DECODE_CACHE_LIMIT:
+            _DECODE_CACHE.popitem(last=False)
+        return audio, ANALYSIS_SAMPLE_RATE
 
 
 @dataclass(frozen=True)
@@ -299,7 +334,7 @@ def analyze_track(
     if cached.exists() and not force:
         return TrackAnalysis(**json.loads(cached.read_text()))
 
-    y, sr = librosa.load(source, sr=22050, mono=True)
+    y, sr = load_analysis_audio(source)
     if len(y) < sr * 10:
         raise ValueError(f"Track is too short to mix: {source}")
 

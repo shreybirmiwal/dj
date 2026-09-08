@@ -49,17 +49,20 @@ Then open `http://localhost:4173`. The prototype lets you search and filter the
 catalog, accept a suggested next track, choose any other track, and see every
 preparation stage. Press the play button on the current track to start immediately.
 In the background, the server runs the same 32-bar smart `stem_phrase` pipeline as
-the CLI: track analysis, Demucs vocal/stem separation, faster-whisper word timing,
-section-aware candidate ranking, tempo/phase alignment, and the final render. The
-browser joins that prepared handoff before its selected phrase and keeps playing
-through the next track while the following transition prepares.
+the CLI: shared track analysis, one reusable four-stem Demucs pass, synchronized
+LRCLIB lyrics (with local transcription fallback), section-aware candidate ranking,
+tempo/phase alignment, and the final render. It predictively warms the three most
+likely next tracks. The browser joins a compact transition capsule before its
+selected phrase, then returns to the tempo-synchronized live incoming deck while
+the following transition prepares.
 
 The first uncached pair can take several minutes and may download neural models.
-Analysis, stems, transcripts, stretched tracks, and finished pair handoffs are all
-cached, so repeated pairs become much faster. Override the library location with
+Analysis, stems, lyrics, short stretched windows, and finished pair handoffs are
+cached, so repeated pairs become much faster without materializing whole-song
+float WAVs for each target tempo. Override the library location with
 `--music-dir /path/to/music` or the `SETMIX_MUSIC_DIR` environment variable.
 
-The performance workspace includes two deck waveforms, phrase and beat counters,
+The performance workspace includes two cached deck waveforms, phrase and beat counters,
 hot cues, beat loops, stem controls, channel EQ/filter/faders, a crossfader, and
 live AI pipeline telemetry. DDJ-FLX4 USB audio and MIDI setup is documented in
 [`docs/DDJ_FLX4.md`](docs/DDJ_FLX4.md).
@@ -261,15 +264,17 @@ stretched transition is acceptable.
 - `<mix>.plan.json`, including cue points, transition times, and peak measurement
 - Optional short MP3 transition previews
 - A validation report for clipping and transition continuity
-- Cached analyses and tempo-matched PCM under `.setmix-cache/`
+- Cached analyses, stems, lyrics, and compact tempo-matched capsules under `.setmix-cache/`
 
 ## Current boundary
 
-The base analyzer uses beat, onset, energy, and spectral features. The optional
-stem layer runs Hybrid Transformer Demucs locally and produces a 250 ms vocal
-activity timeline. The intelligence layer uses faster-whisper locally for lyric
-timing and labels phrase-level sections from energy, brightness, percussion, and
-vocal density. Analyses, stems, sections, and transcripts are cached locally.
+The base analyzer uses beat, onset, energy, and spectral features with a bounded
+shared decode cache. The optional stem layer runs Hybrid Transformer Demucs once
+per track and produces both four reusable stems and a 250 ms vocal activity
+timeline. The app uses synchronized LRCLIB lines when available and faster-whisper
+as its local fallback, then labels phrase-level sections from energy, brightness,
+percussion, and vocal density. Analyses, stems, sections, and transcripts are
+cached locally.
 Large audio-language models such as NVIDIA Audio Flamingo fit best as an
 optional offline semantic critic/candidate reranker, not inside the sample-level
 mixing loop; explicit event and repaired-grid data remain the render contract.

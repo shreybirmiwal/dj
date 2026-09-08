@@ -345,6 +345,55 @@ def _stretched_audio_path(source: Path, tempo_ratio: float, cache_dir: Path) -> 
     return output
 
 
+def _stretched_audio_segment_path(
+    source: Path,
+    tempo_ratio: float,
+    start: float,
+    duration: float,
+    cache_dir: Path,
+) -> Path:
+    """Time-stretch only the window needed by an interactive handoff."""
+    stat = source.stat()
+    start = max(0.0, float(start))
+    duration = max(0.05, float(duration))
+    key = hashlib.sha256(
+        (
+            f"{source}:{stat.st_size}:{stat.st_mtime_ns}:{tempo_ratio:.10f}:"
+            f"{start:.6f}:{duration:.6f}:segment-v1"
+        ).encode()
+    ).hexdigest()[:24]
+    output = cache_dir / f"{key}.wav"
+    if output.exists():
+        return output
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(".partial.wav")
+    command = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-y",
+        "-ss",
+        f"{start * tempo_ratio:.9f}",
+        "-i",
+        str(source),
+        "-vn",
+        "-t",
+        f"{duration:.9f}",
+        "-af",
+        f"atempo={tempo_ratio:.10f}",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-ac",
+        str(CHANNELS),
+        "-c:a",
+        "pcm_f32le",
+        str(temporary),
+    ]
+    subprocess.run(command, check=True)
+    temporary.replace(output)
+    return output
+
+
 def _stretched_path(track: TrackAnalysis, target_bpm: float, cache_dir: Path) -> Path:
     return _stretched_audio_path(
         Path(track.path),
@@ -375,6 +424,21 @@ def _stretched_four_stems(
     ratio = target_bpm / track.bpm
     return {
         name: _stretched_audio_path(path, ratio, cache_dir)
+        for name, path in stems.items()
+    }
+
+
+def _stretched_four_stem_segments(
+    track: TrackAnalysis,
+    target_bpm: float,
+    start: float,
+    duration: float,
+    cache_dir: Path,
+) -> dict[str, Path]:
+    stems = separate_stems(track.path)
+    ratio = target_bpm / track.bpm
+    return {
+        name: _stretched_audio_segment_path(path, ratio, start, duration, cache_dir)
         for name, path in stems.items()
     }
 
@@ -1335,14 +1399,15 @@ def render_pair_handoff(
     output: str | Path,
     *,
     pre_roll_seconds: float = 8.0,
+    post_roll_seconds: float = 8.0,
     progress: Callable[[str], None] | None = None,
 ) -> dict:
-    """Render a browser-ready tail, transition, and incoming-track continuation.
+    """Render a compact browser-ready tail and transition capsule.
 
     The asset begins shortly before the selected transition.  A player already
     running the outgoing track at ``plan.target_bpm`` can therefore join this
-    file at the matching source position and continue across the transition
-    without waiting for the entire outgoing track to be rendered.
+    file at the matching source position, cross the transition, and return to
+    live playback of the incoming track after a short post-roll.
     """
     if len(plan.tracks) != 2 or len(plan.transitions) != 1:
         raise ValueError("A handoff render requires exactly two tracks")
@@ -1350,35 +1415,55 @@ def render_pair_handoff(
     destination = Path(output).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     transition = plan.transitions[0]
-    cache_root = Path(".setmix-cache/stretched")
-    prepared = [_stretched_path(track, plan.target_bpm, cache_root) for track in plan.tracks]
+    cache_root = Path(".setmix-cache/capsules")
     start = max(0.0, transition.from_cue - max(0.0, pre_roll_seconds))
-    start_frame = round(start * SAMPLE_RATE)
-    cue_from = round(transition.from_cue * SAMPLE_RATE)
-    cue_to = round(transition.to_cue * SAMPLE_RATE)
+    before_duration = transition.from_cue - start
     transition_frames = round(transition.duration * SAMPLE_RATE)
-    incoming_end = round(
-        plan.tracks[1].active_end / transition.tempo_ratio_to * SAMPLE_RATE
+    post_roll_seconds = max(2.0, float(post_roll_seconds))
+    outgoing_path = _stretched_audio_segment_path(
+        Path(plan.tracks[0].path),
+        transition.tempo_ratio_from,
+        start,
+        before_duration + transition.duration,
+        cache_root / "tracks",
+    )
+    incoming_path = _stretched_audio_segment_path(
+        Path(plan.tracks[1].path),
+        transition.tempo_ratio_to,
+        transition.to_cue,
+        transition.duration + post_roll_seconds + 0.5,
+        cache_root / "tracks",
     )
     gains = [_track_gain(track) for track in plan.tracks]
 
     with tempfile.TemporaryDirectory(prefix="setmix-handoff-") as temp_dir:
         raw = Path(temp_dir) / "handoff-float.wav"
-        with sf.SoundFile(prepared[0]) as outgoing, sf.SoundFile(prepared[1]) as incoming:
+        with sf.SoundFile(outgoing_path) as outgoing, sf.SoundFile(incoming_path) as incoming:
             before = _read_segment(
                 outgoing,
-                start_frame,
-                max(0, cue_from - start_frame),
+                0,
+                round(before_duration * SAMPLE_RATE),
                 pad=False,
             )
             if progress:
                 progress("Rendering the selected transition")
             if transition.technique in STEM_TECHNIQUES:
-                left_paths = _stretched_four_stems(
-                    plan.tracks[0], plan.target_bpm, cache_root / "stems4"
+                alignment_margin = 0.3
+                left_stem_start = max(0.0, transition.from_cue - alignment_margin)
+                right_stem_start = max(0.0, transition.to_cue - alignment_margin)
+                left_paths = _stretched_four_stem_segments(
+                    plan.tracks[0],
+                    plan.target_bpm,
+                    left_stem_start,
+                    transition.duration + 2 * alignment_margin,
+                    cache_root / "stems4",
                 )
-                right_paths = _stretched_four_stems(
-                    plan.tracks[1], plan.target_bpm, cache_root / "stems4"
+                right_paths = _stretched_four_stem_segments(
+                    plan.tracks[1],
+                    plan.target_bpm,
+                    right_stem_start,
+                    transition.duration + post_roll_seconds + 2 * alignment_margin,
+                    cache_root / "stems4",
                 )
                 left_stems = {name: sf.SoundFile(path) for name, path in left_paths.items()}
                 right_stems = {name: sf.SoundFile(path) for name, path in right_paths.items()}
@@ -1386,8 +1471,8 @@ def render_pair_handoff(
                     aligned_left, aligned_right, consumed_end = _read_aligned_stems(
                         left_stems,
                         right_stems,
-                        cue_from,
-                        cue_to,
+                        round((transition.from_cue - left_stem_start) * SAMPLE_RATE),
+                        round((transition.to_cue - right_stem_start) * SAMPLE_RATE),
                         transition_frames,
                         plan.target_bpm,
                     )
@@ -1402,9 +1487,13 @@ def render_pair_handoff(
                 finally:
                     for handle in (*left_stems.values(), *right_stems.values()):
                         handle.close()
+                consumed_global = right_stem_start + consumed_end / SAMPLE_RATE
+                consumed_incoming = round(
+                    max(0.0, consumed_global - transition.to_cue) * SAMPLE_RATE
+                )
             else:
-                left = _read_segment(outgoing, cue_from, transition_frames)
-                right = _read_segment(incoming, cue_to, transition_frames)
+                left = _read_segment(outgoing, round(before_duration * SAMPLE_RATE), transition_frames)
+                right = _read_segment(incoming, 0, transition_frames)
                 mixed = mix_transition(
                     left,
                     right,
@@ -1414,13 +1503,18 @@ def render_pair_handoff(
                     transition.bars,
                     transition.drop_position,
                 )
-                consumed_end = cue_to + transition_frames
+                consumed_global = transition.to_cue + transition.duration
+                consumed_incoming = transition_frames
 
             with sf.SoundFile(raw, "w", SAMPLE_RATE, CHANNELS, subtype="FLOAT") as handle:
                 handle.write((before * gains[0]).astype(np.float32))
                 handle.write(mixed)
-                incoming.seek(min(consumed_end, len(incoming)))
-                remaining = max(0, min(incoming_end, len(incoming)) - consumed_end)
+                incoming.seek(min(consumed_incoming, len(incoming)))
+                remaining = max(
+                    0,
+                    min(len(incoming), consumed_incoming + round(post_roll_seconds * SAMPLE_RATE))
+                    - consumed_incoming,
+                )
                 written = len(before) + len(mixed)
                 while remaining:
                     block = incoming.read(
@@ -1463,7 +1557,13 @@ def render_pair_handoff(
         "handoff_start": round(start, 6),
         "transition_offset": round(transition_offset, 6),
         "incoming_offset": round(incoming_offset, 6),
-        "incoming_consumed": round(consumed_end / SAMPLE_RATE, 6),
+        "incoming_consumed": round(consumed_global, 6),
+        "incoming_resume_source": round(
+            (consumed_global + post_roll_seconds) * transition.tempo_ratio_to,
+            6,
+        ),
+        "post_roll": round(post_roll_seconds, 6),
+        "capsule": True,
         "duration": round(sf.info(destination).duration, 6),
         "transition": asdict(transition),
     }

@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import numpy as np
+import soundfile as sf
 
 from setmix.analysis import TrackAnalysis
 from setmix.engine import (
+    MixPlan,
+    Transition,
+    _stretched_audio_segment_path,
     _drum_alignment_curve,
     _drum_alignment_transform,
     mix_four_stem_transition,
     mix_loop_bridge_transition,
     mix_stem_transition,
     mix_transition,
+    render_pair_handoff,
 )
 from setmix.intelligence import (
     _event_schedule,
@@ -21,6 +26,79 @@ from setmix.intelligence import (
     rank_transition_candidates,
 )
 from setmix.stems import VocalMap
+
+
+def test_interactive_stretch_only_decodes_requested_window(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"audio")
+    commands = []
+
+    def fake_run(command, check):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"segment")
+
+    from pathlib import Path
+    from setmix import engine
+
+    monkeypatch.setattr(engine.subprocess, "run", fake_run)
+    first = _stretched_audio_segment_path(source, 1.05, 30.0, 12.0, tmp_path / "cache")
+    second = _stretched_audio_segment_path(source, 1.05, 30.0, 12.0, tmp_path / "cache")
+
+    assert first == second
+    assert len(commands) == 1
+    assert commands[0][commands[0].index("-ss") + 1] == "31.500000000"
+    assert commands[0][commands[0].index("-t") + 1] == "12.000000000"
+
+
+def test_pair_handoff_is_a_short_capsule(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    sample_rate = 44100
+    seconds = 10
+    timeline = np.arange(sample_rate * seconds, dtype=np.float32) / sample_rate
+    for name, frequency in (("left.wav", 220.0), ("right.wav", 330.0)):
+        mono = np.sin(timeline * 2 * np.pi * frequency).astype(np.float32) * 0.05
+        sf.write(name, np.column_stack((mono, mono)), sample_rate)
+
+    def track(path: str) -> TrackAnalysis:
+        return TrackAnalysis(
+            path=str((tmp_path / path).resolve()),
+            duration=10.0,
+            bpm=120.0,
+            beat_times=[index * 0.5 for index in range(20)],
+            downbeat_offset=0,
+            cue_in=1.0,
+            cue_out=1.0,
+            active_end=10.0,
+            rms_db=-15.0,
+            beat_confidence=1.0,
+            transition_bars=1,
+        )
+
+    left, right = track("left.wav"), track("right.wav")
+    transition = Transition(
+        from_path=left.path,
+        to_path=right.path,
+        set_time=1.0,
+        from_cue=1.0,
+        to_cue=1.0,
+        duration=1.0,
+        bars=1,
+        tempo_ratio_from=1.0,
+        tempo_ratio_to=1.0,
+        technique="bass_swap",
+    )
+    plan = MixPlan(120.0, [left, right], [transition], 10.0)
+
+    result = render_pair_handoff(
+        plan,
+        tmp_path / "capsule.mp3",
+        pre_roll_seconds=0.5,
+        post_roll_seconds=2.0,
+    )
+
+    assert result["capsule"] is True
+    assert 3.4 < result["duration"] < 3.6
+    assert result["duration"] < seconds / 2
 
 
 def test_transition_has_expected_shape_and_finite_samples() -> None:

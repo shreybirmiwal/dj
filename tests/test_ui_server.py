@@ -14,6 +14,7 @@ def test_browser_media_keeps_supported_audio(tmp_path: Path):
 
 def test_waveform_summary_uses_real_samples_and_cache(tmp_path: Path, monkeypatch):
     import numpy as np
+    from setmix import analysis
 
     source = tmp_path / "song.wav"
     source.write_bytes(b"wave")
@@ -22,14 +23,11 @@ def test_waveform_summary_uses_real_samples_and_cache(tmp_path: Path, monkeypatc
     calls = []
     audio = (np.sin(np.linspace(0, 40, 12000, dtype=np.float32)) * 0.7).astype("<f4")
 
-    class Result:
-        stdout = audio.tobytes()
+    def fake_load(path):
+        calls.append(path)
+        return audio, 12000
 
-    def fake_run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return Result()
-
-    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(analysis, "load_analysis_audio", fake_load)
     first = server.waveform_summary(source, bins=24)
     second = server.waveform_summary(source, bins=24)
 
@@ -54,6 +52,7 @@ def test_lyrics_summary_returns_timestamped_machine_transcript(tmp_path: Path, m
         "words": [{"word": "lyric", "start": 12.9, "end": 13.4, "probability": 0.95}],
     }))
     monkeypatch.setattr(server, "INTELLIGENCE_CACHE_DIR", cache)
+    monkeypatch.setattr(server, "LRCLIB_CACHE_DIR", tmp_path / "lrclib")
 
     result = server.lyrics_summary(source)
 
@@ -67,6 +66,7 @@ def test_lyrics_summary_reports_missing_without_starting_analysis(tmp_path: Path
     source = tmp_path / "song.flac"
     source.write_bytes(b"audio")
     monkeypatch.setattr(server, "INTELLIGENCE_CACHE_DIR", tmp_path / "empty")
+    monkeypatch.setattr(server, "LRCLIB_CACHE_DIR", tmp_path / "lrclib")
 
     result = server.lyrics_summary(source)
 
@@ -78,6 +78,38 @@ def test_lyrics_summary_reports_missing_without_starting_analysis(tmp_path: Path
         "phrases": [],
         "words": [],
     }
+
+
+def test_lrclib_synced_lyrics_are_parsed_and_cached(tmp_path: Path, monkeypatch):
+    source = tmp_path / "song.flac"
+    source.write_bytes(b"audio")
+    monkeypatch.setattr(server, "LRCLIB_CACHE_DIR", tmp_path / "lyrics")
+    calls = []
+
+    def fake_request(endpoint, parameters):
+        calls.append((endpoint, parameters))
+        return {
+            "id": 42,
+            "trackName": "Song",
+            "artistName": "Artist",
+            "albumName": "Album",
+            "duration": 120,
+            "syncedLyrics": "[00:02.50] First line\n[00:05.00] Second line",
+        }
+
+    monkeypatch.setattr(server, "_lrclib_request", fake_request)
+    metadata = {"title": "Song", "artist": "Artist", "album": "Album", "length": 120}
+
+    first = server.fetch_lrclib_lyrics(source, metadata)
+    second = server.fetch_lrclib_lyrics(source, metadata)
+
+    assert first == second
+    assert first["source"] == "LRCLIB"
+    assert first["phrases"] == [
+        {"start": 2.5, "end": 5.0, "text": "First line"},
+        {"start": 5.0, "end": 10.0, "text": "Second line"},
+    ]
+    assert len(calls) == 1
 
 
 def test_browser_media_transcodes_flac_once(tmp_path: Path, monkeypatch):

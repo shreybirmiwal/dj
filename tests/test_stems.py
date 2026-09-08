@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from setmix.analysis import TrackAnalysis
+from pathlib import Path
+
+from setmix import stems as stem_module
 from setmix.stems import VocalMap, choose_vocal_safe_cues
 
 
@@ -36,3 +39,29 @@ def test_activity_fraction_uses_timeline() -> None:
     vocals = VocalMap("track.wav", "test", 0.25, [[2.0, 4.0]], 0.2, 1.0)
     assert vocals.activity_fraction(2.0, 4.0) > 0.95
     assert vocals.activity_fraction(5.0, 7.0) == 0.0
+
+
+def test_vocal_separation_reuses_four_stem_pass(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "track.wav"
+    source.write_bytes(b"audio")
+    folder = tmp_path / "stems4" / "track"
+    folder.mkdir(parents=True)
+    separated = {}
+    for name in ("vocals", "drums", "bass", "other"):
+        separated[name] = folder / f"{name}.mp3"
+        separated[name].write_bytes(name.encode())
+    monkeypatch.setattr(stem_module, "separate_stems", lambda *args, **kwargs: separated)
+
+    commands = []
+
+    def fake_run(command, check):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"mix")
+
+    monkeypatch.setattr(stem_module.subprocess, "run", fake_run)
+    vocals, accompaniment = stem_module.separate_vocals(source, cache_dir=tmp_path / "stems")
+
+    assert vocals == separated["vocals"]
+    assert accompaniment.read_bytes() == b"mix"
+    assert len(commands) == 1
+    assert "--two-stems" not in commands[0]
