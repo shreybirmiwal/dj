@@ -17,6 +17,7 @@ import soundfile as sf
 from scipy.signal import butter, sosfilt, sosfiltfilt
 
 from .analysis import TrackAnalysis, analyze_track
+from .intelligence import TrackIntelligence, rank_transition_candidates
 from .stems import VocalMap, choose_vocal_safe_cues, separate_stems, separate_vocals
 
 
@@ -41,6 +42,12 @@ class Transition:
     phase_adjustment_ms: float = 0.0
     local_bpm_from: float | None = None
     local_bpm_to: float | None = None
+    candidate_score: float | None = None
+    score_breakdown: dict[str, float] | None = None
+    reasons: list[str] | None = None
+    from_section: str | None = None
+    to_section: str | None = None
+    drop_position: float | None = None
 
 
 @dataclass(frozen=True)
@@ -49,14 +56,21 @@ class MixPlan:
     tracks: list[TrackAnalysis]
     transitions: list[Transition]
     estimated_duration: float
+    ranked_candidates: list[list[dict]] | None = None
+    track_intelligence: dict[str, dict] | None = None
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "target_bpm": self.target_bpm,
             "tracks": [asdict(track) for track in self.tracks],
             "transitions": [asdict(item) for item in self.transitions],
             "estimated_duration": self.estimated_duration,
         }
+        if self.ranked_candidates is not None:
+            payload["ranked_candidates"] = self.ranked_candidates
+        if self.track_intelligence is not None:
+            payload["track_intelligence"] = self.track_intelligence
+        return payload
 
 
 def _tempo_at(track: TrackAnalysis, second: float) -> float:
@@ -94,13 +108,15 @@ def analyze_ordered(
 def create_plan(
     analyses: list[TrackAnalysis],
     *,
+    target_bpm: float | None = None,
     max_tempo_change: float = 0.08,
     vocal_maps: dict[str, VocalMap] | None = None,
+    intelligence: dict[str, TrackIntelligence] | None = None,
     technique: str = "auto",
 ) -> MixPlan:
     if len(analyses) < 2:
         raise ValueError("A mix needs at least two tracks")
-    target = analyses[0].bpm
+    target = analyses[0].bpm if target_bpm is None else float(target_bpm)
     for track in analyses:
         change = abs(target / track.bpm - 1.0)
         if change > max_tempo_change:
@@ -110,6 +126,7 @@ def create_plan(
             )
 
     transitions: list[Transition] = []
+    ranked_candidates: list[list[dict]] = []
     set_time = 0.0
     current_source = 0.0
     varied_techniques = (
@@ -127,7 +144,32 @@ def create_plan(
         left_source_cue = left.cue_out
         right_source_cue = right.cue_in
         vocal_overlap: float | None = None
-        if vocal_maps and left.path in vocal_maps and right.path in vocal_maps:
+        selected_candidate = None
+        pair_candidates = []
+        if (
+            vocal_maps
+            and intelligence
+            and left.path in vocal_maps
+            and right.path in vocal_maps
+            and left.path in intelligence
+            and right.path in intelligence
+        ):
+            pair_candidates = rank_transition_candidates(
+                left,
+                right,
+                vocal_maps[left.path],
+                vocal_maps[right.path],
+                intelligence[left.path],
+                intelligence[right.path],
+                target_bpm=target,
+                technique=technique,
+            )
+            if pair_candidates:
+                selected_candidate = pair_candidates[0]
+                left_source_cue = selected_candidate.from_cue
+                right_source_cue = selected_candidate.to_cue
+                vocal_overlap = selected_candidate.vocal_overlap
+        if selected_candidate is None and vocal_maps and left.path in vocal_maps and right.path in vocal_maps:
             left_source_cue, right_source_cue, vocal_overlap = choose_vocal_safe_cues(
                 left,
                 right,
@@ -156,10 +198,10 @@ def create_plan(
         right_source_cue = max(0.0, right_source_cue + source_shift)
         left_cue = left_source_cue / left_ratio
         right_cue = right_source_cue / right_ratio
-        selected = technique
-        if technique == "varied":
+        selected = selected_candidate.technique if selected_candidate is not None else technique
+        if selected_candidate is None and technique == "varied":
             selected = varied_techniques[transition_index % len(varied_techniques)]
-        elif technique == "auto":
+        elif selected_candidate is None and technique == "auto":
             if vocal_overlap is None:
                 selected = "bass_swap"
             elif left.transition_bars >= 16:
@@ -196,15 +238,34 @@ def create_plan(
                 phase_adjustment_ms=round(source_shift / right_ratio * 1000.0, 3),
                 local_bpm_from=round(left_local_bpm, 6),
                 local_bpm_to=round(right_local_bpm, 6),
+                candidate_score=selected_candidate.score if selected_candidate else None,
+                score_breakdown=selected_candidate.score_breakdown if selected_candidate else None,
+                reasons=selected_candidate.reasons if selected_candidate else None,
+                from_section=selected_candidate.from_section if selected_candidate else None,
+                to_section=selected_candidate.to_section if selected_candidate else None,
+                drop_position=selected_candidate.drop_position if selected_candidate else None,
             )
         )
+        ranked_candidates.append([candidate.to_dict() for candidate in pair_candidates])
         set_time += duration
         current_source = right_cue + duration
 
     last = analyses[-1]
     last_ratio = target / last.bpm
     estimated = set_time + max(0.0, last.active_end / last_ratio - current_source)
-    return MixPlan(target, analyses, transitions, round(estimated, 6))
+    serialized_intelligence = (
+        {path: value.to_dict() for path, value in intelligence.items()}
+        if intelligence is not None
+        else None
+    )
+    return MixPlan(
+        target,
+        analyses,
+        transitions,
+        round(estimated, 6),
+        ranked_candidates=ranked_candidates if intelligence is not None else None,
+        track_intelligence=serialized_intelligence,
+    )
 
 
 def _stretched_audio_path(source: Path, tempo_ratio: float, cache_dir: Path) -> Path:
@@ -310,10 +371,16 @@ def _local_transient_phase(
     return float(np.median(offsets)) if offsets else 0.0
 
 
-def _read_segment(handle: sf.SoundFile, start: int, frames: int) -> np.ndarray:
+def _read_segment(
+    handle: sf.SoundFile,
+    start: int,
+    frames: int,
+    *,
+    pad: bool = True,
+) -> np.ndarray:
     handle.seek(max(0, min(start, len(handle))))
     data = handle.read(frames, dtype="float32", always_2d=True)
-    if len(data) < frames:
+    if pad and len(data) < frames:
         data = np.pad(data, ((0, frames - len(data)), (0, 0)))
     return data
 
@@ -357,6 +424,29 @@ def _filter_sweep_mix(outgoing: np.ndarray, incoming: np.ndarray) -> np.ndarray:
         + high_a * high_ga
         + high_b * high_gb
     )
+
+
+def _echo_handoff_mix(
+    outgoing: np.ndarray,
+    incoming: np.ndarray,
+    beat_frames: int,
+) -> np.ndarray:
+    """Hand off rhythmic ownership before adding a non-bass echo tail."""
+    low_a, mid_a, high_a = _split_three(outgoing)
+    low_b, mid_b, high_b = _split_three(incoming)
+    position = np.linspace(0.0, 1.0, len(outgoing), endpoint=False, dtype=np.float32)
+    low_ga, low_gb = _equal_power(_smoothstep((position - 0.34) / 0.20))
+    mid_ga, mid_gb = _equal_power(_smoothstep((position - 0.25) / 0.45))
+    high_ga, high_gb = _equal_power(_smoothstep((position - 0.18) / 0.55))
+    mixed = low_a * low_ga + low_b * low_gb
+    mixed += mid_a * mid_ga + mid_b * mid_gb
+    mixed += high_a * high_ga + high_b * high_gb
+
+    # Echo only material above 2.6 kHz. Delaying the full outgoing master leaves
+    # old kicks and bass notes underneath the established incoming groove.
+    tail_fade = 1.0 - _smoothstep((position - 0.70) / 0.24)
+    mixed += _echo_tail(high_a, beat_frames) * tail_fade[:, None] * 0.22
+    return mixed
 
 
 def _echo_tail(signal: np.ndarray, beat_frames: int) -> np.ndarray:
@@ -433,6 +523,7 @@ def mix_transition(
     incoming_gain: float,
     technique: str = "bass_swap",
     bars: int = 16,
+    drop_position: float | None = None,
 ) -> np.ndarray:
     frames = min(len(outgoing), len(incoming))
     outgoing = outgoing[:frames] * outgoing_gain
@@ -445,6 +536,7 @@ def mix_transition(
         "echo_out",
         "loop_filter",
         "reverb_tail",
+        "drop_cut",
     }
     if technique not in supported:
         raise ValueError(f"Unsupported transition technique: {technique}")
@@ -465,10 +557,54 @@ def mix_transition(
     elif technique == "lowpass_reveal":
         mixed = _cutoff_mix(outgoing, incoming, "lowpass_reveal")
     elif technique == "echo_out":
-        mixed = _filter_sweep_mix(outgoing, incoming)
-        mixed += _echo_tail(outgoing, beat_frames)
+        mixed = _echo_handoff_mix(outgoing, incoming, beat_frames)
     elif technique == "loop_filter":
         mixed = _filter_sweep_mix(_loop_roll(outgoing, beat_frames), incoming)
+    elif technique == "drop_cut":
+        cut = float(np.clip(drop_position if drop_position is not None else 0.5, 0.15, 0.85))
+        position = np.linspace(0.0, 1.0, frames, endpoint=False, dtype=np.float32)
+        beat = beat_frames / max(frames, 1)
+        low_a, mid_a, high_a = _split_three(outgoing)
+        low_b, mid_b, high_b = _split_three(incoming)
+
+        # "Cut on the drop" means a decisive change of rhythmic weight, not a
+        # full-spectrum edit. Remove the outgoing bass over the final beat,
+        # introduce the new bass just after the landmark, and overlap the mids
+        # and highs over two/four beats so the musical phrase still connects.
+        low_gain_a = np.cos(
+            _smoothstep((position - (cut - beat)) / max(beat, 1e-6)) * (math.pi / 2.0)
+        )[:, None]
+        low_gain_b = np.sin(
+            _smoothstep((position - cut) / max(0.25 * beat, 1e-6)) * (math.pi / 2.0)
+        )[:, None]
+        mid_gain_a, mid_gain_b = _equal_power(
+            _smoothstep((position - (cut - beat)) / max(2.0 * beat, 1e-6))
+        )
+        high_gain_a, high_gain_b = _equal_power(
+            _smoothstep((position - (cut - 2.0 * beat)) / max(4.0 * beat, 1e-6))
+        )
+
+        # Establish the destination before its drop without exposing its bass.
+        incoming_high = mid_b * 0.45 + high_b
+        tease = _swept_filter(incoming_high, 650.0, 4200.0, "lowpass")
+        tease_start = max(0.0, cut - 8.0 * beat)
+        tease_gain = 0.16 * _smoothstep(
+            (position - tease_start) / max(cut - tease_start, 1e-6)
+        )
+        tease_gain *= 1.0 - _smoothstep(
+            (position - (cut - 2.0 * beat)) / max(2.0 * beat, 1e-6)
+        )
+
+        mixed = low_a * low_gain_a + low_b * low_gain_b
+        mixed += mid_a * mid_gain_a + mid_b * mid_gain_b
+        mixed += high_a * high_gain_a + high_b * high_gain_b
+        mixed += tease * tease_gain[:, None]
+
+        tail_in = _smoothstep((position - cut) / max(0.25 * beat, 1e-6))
+        tail_out = 1.0 - _smoothstep(
+            (position - (cut + 2.0 * beat)) / max(2.0 * beat, 1e-6)
+        )
+        mixed += _echo_tail(mid_a + high_a, beat_frames) * (tail_in * tail_out)[:, None] * 0.16
     else:
         mixed = _filter_sweep_mix(outgoing, incoming)
         mixed += _reverb_tail(outgoing)
@@ -719,6 +855,7 @@ def iter_mix_blocks(
                     gains[index + 1],
                     transition.technique,
                     transition.bars,
+                    transition.drop_position,
                 )
                 source_position = cue_to + transition_frames
 
@@ -822,6 +959,149 @@ def render_mix(
     return destination
 
 
+def render_pair_handoff(
+    plan: MixPlan,
+    output: str | Path,
+    *,
+    pre_roll_seconds: float = 8.0,
+    progress: Callable[[str], None] | None = None,
+) -> dict:
+    """Render a browser-ready tail, transition, and incoming-track continuation.
+
+    The asset begins shortly before the selected transition.  A player already
+    running the outgoing track at ``plan.target_bpm`` can therefore join this
+    file at the matching source position and continue across the transition
+    without waiting for the entire outgoing track to be rendered.
+    """
+    if len(plan.tracks) != 2 or len(plan.transitions) != 1:
+        raise ValueError("A handoff render requires exactly two tracks")
+
+    destination = Path(output).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    transition = plan.transitions[0]
+    cache_root = Path(".setmix-cache/stretched")
+    prepared = [_stretched_path(track, plan.target_bpm, cache_root) for track in plan.tracks]
+    start = max(0.0, transition.from_cue - max(0.0, pre_roll_seconds))
+    start_frame = round(start * SAMPLE_RATE)
+    cue_from = round(transition.from_cue * SAMPLE_RATE)
+    cue_to = round(transition.to_cue * SAMPLE_RATE)
+    transition_frames = round(transition.duration * SAMPLE_RATE)
+    incoming_end = round(
+        plan.tracks[1].active_end / transition.tempo_ratio_to * SAMPLE_RATE
+    )
+    gains = [_track_gain(track) for track in plan.tracks]
+
+    with tempfile.TemporaryDirectory(prefix="setmix-handoff-") as temp_dir:
+        raw = Path(temp_dir) / "handoff-float.wav"
+        with sf.SoundFile(prepared[0]) as outgoing, sf.SoundFile(prepared[1]) as incoming:
+            before = _read_segment(
+                outgoing,
+                start_frame,
+                max(0, cue_from - start_frame),
+                pad=False,
+            )
+            if progress:
+                progress("Rendering the selected transition")
+            if transition.technique == "stem_phrase":
+                left_paths = _stretched_four_stems(
+                    plan.tracks[0], plan.target_bpm, cache_root / "stems4"
+                )
+                right_paths = _stretched_four_stems(
+                    plan.tracks[1], plan.target_bpm, cache_root / "stems4"
+                )
+                left_stems = {name: sf.SoundFile(path) for name, path in left_paths.items()}
+                right_stems = {name: sf.SoundFile(path) for name, path in right_paths.items()}
+                try:
+                    aligned_left, aligned_right, consumed_end = _read_aligned_stems(
+                        left_stems,
+                        right_stems,
+                        cue_from,
+                        cue_to,
+                        transition_frames,
+                        plan.target_bpm,
+                    )
+                    mixed = mix_four_stem_transition(
+                        aligned_left,
+                        aligned_right,
+                        gains[0],
+                        gains[1],
+                    )
+                finally:
+                    for handle in (*left_stems.values(), *right_stems.values()):
+                        handle.close()
+            else:
+                left = _read_segment(outgoing, cue_from, transition_frames)
+                right = _read_segment(incoming, cue_to, transition_frames)
+                mixed = mix_transition(
+                    left,
+                    right,
+                    gains[0],
+                    gains[1],
+                    transition.technique,
+                    transition.bars,
+                    transition.drop_position,
+                )
+                consumed_end = cue_to + transition_frames
+
+            with sf.SoundFile(raw, "w", SAMPLE_RATE, CHANNELS, subtype="FLOAT") as handle:
+                handle.write((before * gains[0]).astype(np.float32))
+                handle.write(mixed)
+                incoming.seek(min(consumed_end, len(incoming)))
+                remaining = max(0, min(incoming_end, len(incoming)) - consumed_end)
+                written = len(before) + len(mixed)
+                while remaining:
+                    block = incoming.read(
+                        min(BLOCK_FRAMES, remaining), dtype="float32", always_2d=True
+                    )
+                    if len(block) == 0:
+                        break
+                    handle.write((block * gains[1]).astype(np.float32))
+                    remaining -= len(block)
+                    written += len(block)
+                    if progress and written % (SAMPLE_RATE * 60) < BLOCK_FRAMES:
+                        progress(f"Rendered {written / SAMPLE_RATE:7.1f}s")
+
+        suffix = destination.suffix.lower()
+        codec_args = {
+            ".flac": ["-c:a", "flac"],
+            ".mp3": ["-c:a", "libmp3lame", "-q:a", "2"],
+            ".m4a": ["-c:a", "aac", "-b:a", "256k"],
+        }.get(suffix, ["-c:a", "pcm_s24le"])
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(raw),
+                "-af",
+                "alimiter=limit=0.891251:attack=5:release=80:level=false",
+                *codec_args,
+                str(destination),
+            ],
+            check=True,
+        )
+
+    transition_offset = transition.from_cue - start
+    incoming_offset = transition_offset + transition.duration
+    metadata = {
+        "target_bpm": plan.target_bpm,
+        "handoff_start": round(start, 6),
+        "transition_offset": round(transition_offset, 6),
+        "incoming_offset": round(incoming_offset, 6),
+        "incoming_consumed": round(consumed_end / SAMPLE_RATE, 6),
+        "duration": round(sf.info(destination).duration, 6),
+        "transition": asdict(transition),
+    }
+    destination.with_suffix(destination.suffix + ".json").write_text(
+        json.dumps(metadata, indent=2) + "\n"
+    )
+    if progress:
+        progress(f"Wrote {destination}")
+    return metadata
+
+
 def render_transition_auditions(
     plan: MixPlan,
     output_dir: str | Path,
@@ -867,7 +1147,18 @@ def render_transition_auditions(
             before = _read_segment(outgoing, max(0, cue_from - context_frames), context_frames)
             left = _read_segment(outgoing, cue_from, frames)
             right = _read_segment(incoming, cue_to, frames)
-            after = _read_segment(incoming, cue_to + frames, context_frames)
+            incoming_active_end = round(
+                plan.tracks[index + 1].active_end
+                / transition.tempo_ratio_to
+                * SAMPLE_RATE
+            )
+            after_start = cue_to + frames
+            after = _read_segment(
+                incoming,
+                after_start,
+                min(context_frames, max(0, incoming_active_end - after_start)),
+                pad=False,
+            )
             selected_techniques = (transition.technique,) if selected_only else techniques
             for technique in selected_techniques:
                 if technique == "stem_phrase":
@@ -892,7 +1183,12 @@ def render_transition_auditions(
                             _track_gain(plan.tracks[index]),
                             _track_gain(plan.tracks[index + 1]),
                         )
-                        after = _read_segment(incoming, consumed_end, context_frames)
+                        after = _read_segment(
+                            incoming,
+                            consumed_end,
+                            min(context_frames, max(0, incoming_active_end - consumed_end)),
+                            pad=False,
+                        )
                     finally:
                         for handle in (*left_stems.values(), *right_stems.values()):
                             handle.close()
@@ -904,6 +1200,7 @@ def render_transition_auditions(
                         _track_gain(plan.tracks[index + 1]),
                         technique,
                         transition.bars,
+                        transition.drop_position if technique == "drop_cut" else None,
                     )
                 audition = np.concatenate(
                     (

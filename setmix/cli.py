@@ -15,6 +15,7 @@ from .engine import (
     stream_ordered_live,
     validate_render,
 )
+from .intelligence import analyze_intelligence
 from .stems import analyze_vocals
 
 
@@ -29,6 +30,7 @@ TECHNIQUES = (
     "echo_out",
     "loop_filter",
     "reverb_tail",
+    "drop_cut",
 )
 
 
@@ -53,6 +55,8 @@ def _parser() -> argparse.ArgumentParser:
     plan.add_argument("tracks", nargs="+")
     plan.add_argument("-o", "--output", required=True)
     plan.add_argument("--vocals", action="store_true", help="use neural vocal maps when planning")
+    plan.add_argument("--smart", action="store_true", help="rank section- and word-aware transition candidates")
+    plan.add_argument("--word-model", default="base", help="faster-whisper model used by --smart")
     plan.add_argument("--technique", choices=TECHNIQUES, default="auto")
 
     render = sub.add_parser("render", help="render an ordered playlist to WAV or FLAC")
@@ -60,6 +64,8 @@ def _parser() -> argparse.ArgumentParser:
     render.add_argument("-o", "--output", required=True)
     render.add_argument("--previews", help="directory for transition MP3 previews")
     render.add_argument("--vocals", action="store_true", help="use neural vocal maps when planning")
+    render.add_argument("--smart", action="store_true", help="rank section- and word-aware transition candidates")
+    render.add_argument("--word-model", default="base", help="faster-whisper model used by --smart")
     render.add_argument("--technique", choices=TECHNIQUES, default="auto")
 
     stream = sub.add_parser("stream", help="play the generated mix through ffplay")
@@ -67,6 +73,8 @@ def _parser() -> argparse.ArgumentParser:
     stream.add_argument("--seconds", type=float, help="stop after this many seconds")
     stream.add_argument("--transition", type=int, help="start eight seconds before transition N")
     stream.add_argument("--vocals", action="store_true", help="use neural vocal maps when planning")
+    stream.add_argument("--smart", action="store_true", help="rank section- and word-aware transition candidates")
+    stream.add_argument("--word-model", default="base", help="faster-whisper model used by --smart")
     stream.add_argument("--technique", choices=TECHNIQUES, default="auto")
 
     live = sub.add_parser("live", help="play now and prepare future tracks asynchronously")
@@ -87,10 +95,21 @@ def _parser() -> argparse.ArgumentParser:
     stems.add_argument("tracks", nargs="+")
     stems.add_argument("--force", action="store_true")
 
+    intelligent = sub.add_parser(
+        "intelligence",
+        help="detect sections and generate word-level vocal timelines",
+    )
+    intelligent.add_argument("tracks", nargs="+")
+    intelligent.add_argument("--force", action="store_true")
+    intelligent.add_argument("--word-model", default="base")
+    intelligent.add_argument("--no-words", action="store_true", help="only run section detection")
+
     audition = sub.add_parser("audition", help="render every effect as a short transition preview")
     audition.add_argument("tracks", nargs="+")
     audition.add_argument("-o", "--output", required=True)
     audition.add_argument("--vocals", action="store_true", help="use neural vocal maps when planning")
+    audition.add_argument("--smart", action="store_true", help="rank section- and word-aware transition candidates")
+    audition.add_argument("--word-model", default="base", help="faster-whisper model used by --smart")
     audition.add_argument("--technique", choices=TECHNIQUES, default="auto")
     audition.add_argument(
         "--selected-only",
@@ -116,6 +135,27 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "stems":
             values = [analyze_vocals(path, force=args.force) for path in tracks]
             print(json.dumps([value.__dict__ for value in values], indent=2))
+            return 0
+        if args.command == "intelligence":
+            analyses = analyze_ordered(
+                tracks,
+                transition_bars=args.bars,
+                workers=args.workers,
+                progress=_progress,
+            )
+            _progress("Generating neural vocal-activity maps")
+            vocal_maps = {analysis.path: analyze_vocals(analysis.path, force=args.force) for analysis in analyses}
+            values = [
+                analyze_intelligence(
+                    analysis,
+                    vocal_maps[analysis.path],
+                    word_model=args.word_model,
+                    transcribe=not args.no_words,
+                    force=args.force,
+                )
+                for analysis in analyses
+            ]
+            print(json.dumps([value.to_dict() for value in values], indent=2))
             return 0
         if args.command == "live":
             stream_ordered_live(
@@ -144,13 +184,31 @@ def main(argv: list[str] | None = None) -> int:
             progress=_progress,
         )
         vocal_maps = None
-        needs_vocals = getattr(args, "vocals", False) or getattr(args, "technique", "") == "stem_phrase"
+        smart = getattr(args, "smart", False)
+        needs_vocals = (
+            getattr(args, "vocals", False)
+            or getattr(args, "technique", "") == "stem_phrase"
+            or smart
+        )
         if needs_vocals:
             _progress("Generating neural vocal-activity maps")
             vocal_maps = {str(path): analyze_vocals(path) for path in tracks}
+        intelligence = None
+        if smart:
+            assert vocal_maps is not None
+            _progress("Detecting sections and transcribing word-level vocals")
+            intelligence = {
+                analysis.path: analyze_intelligence(
+                    analysis,
+                    vocal_maps[analysis.path],
+                    word_model=args.word_model,
+                )
+                for analysis in analyses
+            }
         mix_plan = create_plan(
             analyses,
             vocal_maps=vocal_maps,
+            intelligence=intelligence,
             technique=getattr(args, "technique", "auto"),
         )
         if args.command == "audition":

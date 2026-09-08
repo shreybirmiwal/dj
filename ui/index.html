@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0b0d" />
+    <title>SetMix — continuous intelligent DJ</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#" aria-label="SetMix home">
+          <span class="brand-mark"><i></i><i></i><i></i><i></i></span>
+          <span>setmix</span>
+        </a>
+
+        <nav class="main-nav" aria-label="Main navigation">
+          <button class="nav-item active" data-view="catalog">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16M4 12h16M4 18.5h10"/></svg>
+            Catalog
+          </button>
+          <button class="nav-item" data-view="queue">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h11M4 12h8M4 17h6M18 14v6m-3-3h6"/></svg>
+            Up next
+            <span class="nav-count" id="queueCount">0</span>
+          </button>
+          <button class="nav-item" data-view="history">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.8 8A8 8 0 1 1 4 12m.8-4H9M4.8 8V3.8M12 8v4l2.8 1.8"/></svg>
+            History
+          </button>
+        </nav>
+
+        <div class="sidebar-rule"></div>
+
+        <div class="station-block">
+          <p class="sidebar-label">YOUR STATION</p>
+          <button class="station-card">
+            <span class="station-avatar">SB</span>
+            <span><strong>Shrey's room</strong><small>Private session</small></span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+        </div>
+
+        <div class="output-card">
+          <span class="output-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4m4-7v10m4-14v18m4-15v12m4-8v4"/></svg>
+          </span>
+          <span><strong>Continuous output</strong><small id="outputStatus"><i></i> Ready to play</small></span>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div class="mobile-brand">setmix</div>
+          <div class="live-pill"><span></span> LIVE <b id="sessionTime">01:48:24</b></div>
+          <div class="top-actions">
+            <button class="icon-button" aria-label="Notifications">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>
+              <i></i>
+            </button>
+            <button class="avatar-button" aria-label="Account menu">SB</button>
+          </div>
+        </header>
+
+        <div class="content">
+          <section class="hero-grid">
+            <article class="now-playing-panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow"><span class="pulse-dot"></span> NOW PLAYING</p>
+                  <p class="mix-note">Mixed live by SetMix</p>
+                </div>
+                <button class="more-button" aria-label="More options">•••</button>
+              </div>
+
+              <div class="now-playing-main">
+                <div class="cover-wrap">
+                  <div class="cover cover-large cover-1" id="currentCover">
+                    <span class="cover-ring one"></span><span class="cover-ring two"></span>
+                    <div class="cover-label"><b id="coverTitle">GLUE</b><small>FEEL MY BICEP</small></div>
+                  </div>
+                  <button class="playback-toggle" id="playbackToggle" aria-label="Play continuous mix"><span></span></button>
+                </div>
+                <div class="track-hero-info">
+                  <div class="track-title-line">
+                    <div>
+                      <h1 id="currentTitle">Glue</h1>
+                      <p id="currentArtist">Bicep</p>
+                    </div>
+                    <button class="heart-button" id="heartButton" aria-label="Save track">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1.1L12 21l7.7-7.5 1.1-1.1a5.5 5.5 0 0 0 0-7.8Z"/></svg>
+                    </button>
+                  </div>
+
+                  <div class="wave-wrap" id="waveform" aria-label="Track progress"></div>
+                  <div class="time-row"><span id="elapsed">2:14</span><span id="remaining">−3:28</span></div>
+
+                  <div class="track-metrics">
+                    <div><span>BPM</span><strong id="currentBpm">128</strong></div>
+                    <div><span>KEY</span><strong id="currentKey">A min</strong></div>
+                    <div><span>ENERGY</span><strong class="energy-bars" id="currentEnergy"><i></i><i></i><i></i><i></i><i></i></strong></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="transition-strip">
+                <div class="transition-copy">
+                  <span class="transition-icon">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 7 3-3 3 3M7 4v12a4 4 0 0 0 4 4h1m8-3-3 3-3-3m3 3V8a4 4 0 0 0-4-4h-1"/></svg>
+                  </span>
+                  <span><strong id="transitionStatus">Smart transition armed</strong><small id="transitionDetail">Best mix window in 2:44</small></span>
+                </div>
+                <div class="technique-pill"><span>Technique</span><strong id="technique">Bass swap</strong></div>
+                <label class="switch-label">
+                  <span>Smart timing</span>
+                  <input type="checkbox" id="smartToggle" checked />
+                  <span class="switch"></span>
+                </label>
+              </div>
+            </article>
+
+            <aside class="suggestion-panel">
+              <div class="suggestion-heading">
+                <div>
+                  <p class="eyebrow lavender">SUGGESTED NEXT</p>
+                  <h2>Keep the room moving</h2>
+                </div>
+                <div class="match-ring" id="matchRing"><strong id="matchValue">96</strong><span>%</span></div>
+              </div>
+
+              <div class="suggested-track">
+                <div class="cover cover-medium cover-2" id="suggestedCover">
+                  <span class="moon"></span><span class="horizon"></span>
+                </div>
+                <div>
+                  <h3 id="suggestedTitle">Apricots</h3>
+                  <p id="suggestedArtist">Bicep</p>
+                  <span class="tag" id="suggestedGenre">Electronic</span>
+                </div>
+              </div>
+
+              <div class="compatibility-list">
+                <div><span class="compat-icon tempo">↗</span><span><small>Tempo</small><strong id="tempoReason">+1 BPM · natural lift</strong></span><b>Great</b></div>
+                <div><span class="compat-icon key">◇</span><span><small>Harmonic match</small><strong id="keyReason">A min → C maj</strong></span><b>Perfect</b></div>
+                <div><span class="compat-icon energy">⌁</span><span><small>Energy flow</small><strong id="energyReason">Smooth build</strong></span><b>+8%</b></div>
+              </div>
+
+              <button class="primary-button" id="acceptSuggestion">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+                <span>Mix this next</span>
+              </button>
+              <button class="text-button" id="anotherSuggestion">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v6h-6"/></svg>
+                Suggest another
+              </button>
+            </aside>
+          </section>
+
+          <section class="catalog-section">
+            <div class="catalog-title-row">
+              <div><p class="eyebrow lavender">YOUR MUSIC</p><h2>Catalog</h2><p class="catalog-source" id="catalogSource">Loading local library…</p></div>
+              <label class="search-box">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+                <input type="search" id="searchInput" placeholder="Search tracks or artists" />
+                <kbd>⌘ K</kbd>
+              </label>
+            </div>
+
+            <div class="filter-row" id="filterRow">
+              <button class="filter active" data-filter="All">All tracks <span id="catalogCount">…</span></button>
+              <button class="filter-icon" aria-label="More filters">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
+              </button>
+            </div>
+
+            <div class="track-table-wrap">
+              <table class="track-table">
+                <thead><tr><th>#</th><th>Title</th><th>BPM</th><th>Key</th><th>Energy</th><th>Length</th><th><span class="sr-only">Actions</span></th></tr></thead>
+                <tbody id="trackRows"></tbody>
+              </table>
+              <div class="empty-state" id="emptyState" hidden>No tracks match that search.</div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite">
+      <span class="toast-check">✓</span><span><strong>Added to the mix</strong><small>SetMix will bring it in at the best moment.</small></span>
+    </div>
+
+    <audio id="audioPrimary" preload="metadata"></audio>
+    <audio id="audioSecondary" preload="metadata"></audio>
+
+    <script src="app.js"></script>
+  </body>
+</html>

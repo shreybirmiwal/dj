@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import numpy as np
 
+from setmix.analysis import TrackAnalysis
 from setmix.engine import (
     _drum_alignment_transform,
     mix_four_stem_transition,
     mix_stem_transition,
     mix_transition,
 )
+from setmix.intelligence import (
+    LyricPhrase,
+    SectionSpan,
+    TrackIntelligence,
+    VocalTranscript,
+    WordTimestamp,
+    rank_transition_candidates,
+)
+from setmix.stems import VocalMap
 
 
 def test_transition_has_expected_shape_and_finite_samples() -> None:
@@ -45,11 +55,48 @@ def test_all_transition_techniques_are_finite() -> None:
         "echo_out",
         "loop_filter",
         "reverb_tail",
+        "drop_cut",
     ):
         result = mix_transition(left, right, 1.0, 1.0, technique=technique, bars=2)
         assert result.shape == left.shape
         assert np.isfinite(result).all()
         assert float(np.max(np.abs(result))) < 1.0
+
+
+def test_drop_cut_preserves_outgoing_then_switches_on_landmark() -> None:
+    frames = 44100 * 4
+    outgoing = np.zeros((frames, 2), dtype="float32")
+    incoming = np.zeros((frames, 2), dtype="float32")
+    outgoing[:, 0] = 0.20
+    incoming[:, 1] = 0.20
+    result = mix_transition(
+        outgoing,
+        incoming,
+        1.0,
+        1.0,
+        technique="drop_cut",
+        bars=2,
+        drop_position=0.6,
+    )
+    assert float(np.mean(np.abs(result[: frames // 2, 0]))) > 0.15
+    assert float(np.mean(np.abs(result[: frames // 2, 1]))) < 0.05
+    assert float(np.mean(np.abs(result[-frames // 5 :, 1]))) > 0.15
+    assert float(np.mean(np.abs(result[-frames // 5 :, 0]))) < 0.05
+    # A drop handoff may be decisive, but it must not introduce a waveform jump.
+    assert float(np.max(np.abs(np.diff(result, axis=0)))) < 0.05
+
+
+def test_echo_out_does_not_leave_outgoing_low_end_under_incoming_beat() -> None:
+    frames = 44100 * 4
+    time = np.arange(frames) / 44100.0
+    outgoing = np.zeros((frames, 2), dtype="float32")
+    incoming = np.zeros((frames, 2), dtype="float32")
+    outgoing[:, 0] = np.sin(time * 2 * np.pi * 80.0) * 0.2
+    incoming[:, 1] = np.sin(time * 2 * np.pi * 110.0) * 0.2
+    result = mix_transition(outgoing, incoming, 1.0, 1.0, technique="echo_out", bars=2)
+    tail = result[-frames // 10 :]
+    assert float(np.sqrt(np.mean(np.square(tail[:, 0])))) < 0.02
+    assert float(np.sqrt(np.mean(np.square(tail[:, 1])))) > 0.10
 
 
 def test_stem_transition_separates_vocal_handoffs() -> None:
@@ -98,3 +145,87 @@ def test_drum_alignment_tracks_gradual_tempo_drift() -> None:
     intercept, slope = _drum_alignment_transform(outgoing, incoming, 120.0)
     assert abs(intercept - 0.06) < 0.025
     assert abs(slope - 0.002) < 0.001
+
+
+def _intelligent_track(path: str) -> TrackAnalysis:
+    return TrackAnalysis(
+        path=path,
+        duration=64.0,
+        bpm=120.0,
+        beat_times=[index * 0.5 for index in range(128)],
+        downbeat_offset=0,
+        cue_in=0.0,
+        cue_out=32.0,
+        active_end=63.5,
+        rms_db=-12.0,
+        beat_confidence=0.95,
+        transition_bars=8,
+        phrase_offset=0,
+        musical_key="C major",
+        camelot_key="8B",
+        key_confidence=0.9,
+    )
+
+
+def test_candidates_are_ranked_and_explain_their_scores() -> None:
+    left = _intelligent_track("left.wav")
+    right = _intelligent_track("right.wav")
+    left_vocals = VocalMap(left.path, "test", 0.25, [[0.0, 22.0]], 0.34, 1.0)
+    right_vocals = VocalMap(right.path, "test", 0.25, [[24.0, 60.0]], 0.56, 1.0)
+    section = SectionSpan(0.0, 64.0, "verse", 0.6, 0.5, 0.5, 0.5, 0.9)
+    left_transcript = VocalTranscript(
+        left.path,
+        "test",
+        "en",
+        [WordTimestamp("done.", 21.9, 22.0, 0.99)],
+        [LyricPhrase(20.0, 22.0, "done.")],
+        0.99,
+    )
+    right_transcript = VocalTranscript(
+        right.path,
+        "test",
+        "en",
+        [WordTimestamp("start", 24.0, 24.3, 0.99)],
+        [LyricPhrase(24.0, 26.0, "start")],
+        0.99,
+    )
+    candidates = rank_transition_candidates(
+        left,
+        right,
+        left_vocals,
+        right_vocals,
+        TrackIntelligence(left.path, [section], left_transcript),
+        TrackIntelligence(right.path, [section], right_transcript),
+        target_bpm=120.0,
+    )
+    assert len(candidates) > 1
+    assert candidates == sorted(candidates, key=lambda item: item.score, reverse=True)
+    assert "word_boundaries" in candidates[0].score_breakdown
+    assert candidates[0].reasons
+    assert candidates[0].from_cue in left.beat_times[::32]
+    assert candidates[0].to_cue in right.beat_times[::32]
+
+
+def test_planner_prefers_intro_then_cut_on_incoming_drop() -> None:
+    left = _intelligent_track("left.wav")
+    right = _intelligent_track("right.wav")
+    quiet_left = VocalMap(left.path, "test", 0.25, [], 0.0, 1.0)
+    quiet_right = VocalMap(right.path, "test", 0.25, [], 0.0, 1.0)
+    left_sections = [SectionSpan(0.0, 64.0, "outro", 0.6, 0.5, 0.5, 0.0, 0.9)]
+    right_sections = [
+        SectionSpan(0.0, 24.0, "verse", 0.4, 0.5, 0.4, 0.0, 0.9),
+        SectionSpan(24.0, 64.0, "drop", 0.9, 0.6, 0.9, 0.0, 0.9),
+    ]
+    candidates = rank_transition_candidates(
+        left,
+        right,
+        quiet_left,
+        quiet_right,
+        TrackIntelligence(left.path, left_sections, None),
+        TrackIntelligence(right.path, right_sections, None),
+        target_bpm=120.0,
+    )
+    assert candidates[0].technique == "drop_cut"
+    assert candidates[0].to_cue == 16.0
+    assert candidates[0].drop_position == 0.5
+    assert candidates[0].score_breakdown["drop_opportunity"] > 0.9

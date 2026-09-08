@@ -1,0 +1,2 @@
+-r requirements-stems.txt
+faster-whisper==1.2.0
