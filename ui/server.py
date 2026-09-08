@@ -25,7 +25,9 @@ PROJECT_DIR = UI_DIR.parent
 CACHE_ROOT = Path(os.environ.get("SETMIX_CACHE_DIR", PROJECT_DIR / ".setmix-cache")).expanduser()
 MIX_CACHE_DIR = CACHE_ROOT / "ui-mixes"
 MEDIA_CACHE_DIR = CACHE_ROOT / "ui-media"
+WAVEFORM_CACHE_DIR = CACHE_ROOT / "ui-waveforms"
 MEDIA_CACHE_LOCK = threading.Lock()
+WAVEFORM_CACHE_LOCK = threading.Lock()
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
@@ -183,6 +185,85 @@ def browser_media_path(path: Path) -> Path:
         finally:
             temporary.unlink(missing_ok=True)
     return output
+
+
+def _vocal_segments(path: Path) -> list[list[float]]:
+    resolved = str(path.resolve())
+    for record_path in (CACHE_ROOT / "stems").glob("*/vocal-map.json"):
+        try:
+            record = json.loads(record_path.read_text())
+            if record.get("path") == resolved:
+                return [[float(start), float(end)] for start, end in record.get("segments", [])]
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return []
+
+
+def waveform_summary(path: Path, *, bins: int = 900) -> dict:
+    """Build a cached, real three-band waveform suitable for deck rendering."""
+    import numpy as np
+
+    stat = path.stat()
+    fingerprint = hashlib.sha256(
+        f"waveform-v2:{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{bins}".encode()
+    ).hexdigest()[:24]
+    output = WAVEFORM_CACHE_DIR / f"{fingerprint}.json"
+    if output.exists():
+        return json.loads(output.read_text())
+
+    with WAVEFORM_CACHE_LOCK:
+        if output.exists():
+            return json.loads(output.read_text())
+        sample_rate = 12000
+        decoded = subprocess.run(
+            [
+                "ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "1",
+                "-ar", str(sample_rate), "-f", "f32le", "pipe:1",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        samples = np.frombuffer(decoded, dtype="<f4")
+        if samples.size == 0:
+            raise ValueError(f"No waveform samples decoded from {path}")
+
+        edges = np.linspace(0, samples.size, bins + 1, dtype=np.int64)
+        rows = np.zeros((bins, 3), dtype=np.float64)
+        peaks = np.zeros(bins, dtype=np.float64)
+        frequency_bins = np.fft.rfftfreq(512, 1 / sample_rate)
+        masks = (
+            frequency_bins < 250,
+            (frequency_bins >= 250) & (frequency_bins < 2500),
+            frequency_bins >= 2500,
+        )
+        for index in range(bins):
+            segment = samples[edges[index]:edges[index + 1]]
+            if segment.size == 0:
+                continue
+            peaks[index] = float(np.percentile(np.abs(segment), 97))
+            if segment.size < 32:
+                spectrum = np.abs(np.fft.rfft(segment, n=512))
+            else:
+                take = np.linspace(0, segment.size - 1, 512, dtype=np.int64)
+                spectrum = np.abs(np.fft.rfft(segment[take] * np.hanning(512)))
+            energy = np.asarray([float(np.sqrt(np.mean(spectrum[mask] ** 2))) for mask in masks])
+            total = float(energy.sum())
+            rows[index] = energy / total if total else (0, 0, 0)
+
+        reference = float(np.percentile(peaks, 99)) or 1.0
+        envelope = np.clip(peaks / reference, 0, 1)
+        rows *= envelope[:, None]
+        payload = {
+            "duration": round(samples.size / sample_rate, 3),
+            "sampleRate": sample_rate,
+            "bands": np.round(rows, 4).tolist(),
+            "vocalSegments": _vocal_segments(path),
+        }
+        WAVEFORM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, separators=(",", ":")))
+        temporary.replace(output)
+        return payload
 
 
 class MixManager:
@@ -412,6 +493,17 @@ class SetMixHandler(SimpleHTTPRequestHandler):
                 "tracks": [{key: value for key, value in track.items() if key != "_path"} for track in self.catalog],
             }
             self._send_json(payload)
+            return
+        if route.startswith("/api/waveforms/"):
+            track_id = route.removeprefix("/api/waveforms/")
+            track = next((item for item in self.catalog if item["id"] == track_id), None)
+            if not track:
+                self.send_error(404, "Track not found")
+                return
+            try:
+                self._send_json(waveform_summary(track["_path"]))
+            except (OSError, ValueError, subprocess.CalledProcessError) as error:
+                self._send_json({"error": f"Could not analyze waveform: {error}"}, status=500)
             return
         if route.startswith("/api/mixes/"):
             job_id = route.removeprefix("/api/mixes/")

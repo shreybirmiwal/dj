@@ -90,9 +90,17 @@
                   <div class="deck-key"><small>KEY</small><b id="deckAKey">—</b></div>
                   <div class="deck-bpm"><small>BPM</small><b id="deckABpm">—</b></div>
                 </div>
-                <div class="overview-wave"><canvas id="deckAWave" width="900" height="152"></canvas><span class="playhead"></span><i class="cue-marker" style="left:12%">1</i><i class="cue-marker amber" style="left:68%">MIX</i></div>
+                <div class="overview-wave"><canvas id="deckAWave" width="900" height="190"></canvas><span class="playhead"></span></div>
                 <div class="deck-time"><strong id="deckATime">00:00.000</strong><span id="deckARemaining">-00:00.000</span><b id="deckAPhrase">PHRASE 01 / BAR 1.1</b></div>
                 <div class="beat-grid" id="deckABeatgrid"></div>
+                <div class="deck-mode-strip">
+                  <button class="active" id="quantizeToggle" title="Quantize">Q</button>
+                  <button class="active" id="keyLockToggle" title="Master tempo / key lock">MT</button>
+                  <button id="slipToggle" title="Slip mode">SLIP</button>
+                  <span>BEAT JUMP</span>
+                  <button data-beat-jump="-16">−16</button><button data-beat-jump="-4">−4</button>
+                  <button data-beat-jump="4">+4</button><button data-beat-jump="16">+16</button>
+                </div>
                 <div class="deck-controls">
                   <button class="transport cue-button" id="deckACue"><span>CUE</span><small>RETURN</small></button>
                   <button class="transport play-button" id="deckAPlay"><span class="transport-icon">▶</span><small>PLAY</small></button>
@@ -144,9 +152,15 @@
                   <div class="deck-key"><small>KEY</small><b id="deckBKey">—</b></div>
                   <div class="deck-bpm"><small>BPM</small><b id="deckBBpm">—</b></div>
                 </div>
-                <div class="overview-wave preview"><canvas id="deckBWave" width="900" height="152"></canvas><span class="load-line"></span><i class="cue-marker violet" style="left:22%">IN</i><i class="cue-marker amber" style="left:57%">DROP</i></div>
+                <div class="overview-wave preview"><canvas id="deckBWave" width="900" height="190"></canvas></div>
                 <div class="deck-time"><strong id="deckBTime">--:--.---</strong><span id="deckBLength">-00:00.000</span><b id="deckBState">STANDBY / ANALYSIS</b></div>
                 <div class="beat-grid secondary" id="deckBBeatgrid"></div>
+                <div class="deck-mode-strip secondary-tools">
+                  <button class="active" id="keySyncToggle">KEY SYNC</button>
+                  <button class="active" id="phraseSyncToggle">PHRASE</button>
+                  <span id="deckBGridInfo">GRID --</span>
+                  <span id="deckBVocalInfo">VOCALS --</span>
+                </div>
                 <div class="deck-controls">
                   <button class="transport cue-button" id="deckBCue"><span>CUE</span><small>PREVIEW</small></button>
                   <button class="transport load-button" id="deckBLoad"><span>LOAD</span><small>TO QUEUE</small></button>
@@ -199,7 +213,7 @@
                     </button>
                   </div>
 
-                  <div class="wave-wrap" id="waveform" aria-label="Track progress"></div>
+                  <div class="wave-wrap" id="waveform" aria-label="Track progress"><canvas id="heroWave" width="900" height="96"></canvas><span class="hero-playhead"></span></div>
                   <div class="time-row"><span id="elapsed">2:14</span><span id="remaining">−3:28</span></div>
 
                   <div class="track-metrics">
@@ -272,20 +286,43 @@
                 <kbd>⌘ K</kbd>
               </label>
             </div>
-
-            <div class="filter-row" id="filterRow">
-              <button class="filter active" data-filter="All">All tracks <span id="catalogCount">…</span></button>
-              <button class="filter-icon" aria-label="More filters">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
-              </button>
+            <div class="browser-modebar">
+              <button class="active">COLLECTION</button><button>RELATED TRACKS</button><button>MATCH</button><button>HISTORY</button>
+              <span>AI ANALYSIS</span><b id="analysisCount">0 / 0 READY</b>
             </div>
 
-            <div class="track-table-wrap">
-              <table class="track-table">
-                <thead><tr><th>#</th><th>Title</th><th>BPM</th><th>Key</th><th>Energy</th><th>Length</th><th><span class="sr-only">Actions</span></th></tr></thead>
-                <tbody id="trackRows"></tbody>
-              </table>
-              <div class="empty-state" id="emptyState" hidden>No tracks match that search.</div>
+            <div class="library-workspace">
+              <aside class="collection-tree">
+                <strong>COLLECTION</strong>
+                <button class="active" data-library-view="all"><span>▦</span>All Tracks <b id="treeAllCount">0</b></button>
+                <button data-library-view="analyzed"><span>◈</span>Analyzed <b id="treeAnalyzedCount">0</b></button>
+                <button data-library-view="energy"><span>↗</span>Peak Energy</button>
+                <button data-library-view="harmonic"><span>◇</span>Harmonic Match</button>
+                <strong>SMART LISTS</strong>
+                <button data-library-view="ready"><span>●</span>Transition Ready</button>
+                <button data-library-view="pending"><span>○</span>Needs Analysis</button>
+                <strong>PLAYLISTS</strong>
+                <button><span>⌄</span>DJ Music</button>
+                <button class="tree-child"><span>♬</span>Current Session</button>
+                <button class="tree-child"><span>♬</span>High Confidence</button>
+              </aside>
+
+              <div class="library-main">
+                <div class="filter-row" id="filterRow">
+                  <button class="filter active" data-filter="All">All tracks <span id="catalogCount">…</span></button>
+                  <button class="filter-icon" aria-label="More filters">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
+                  </button>
+                </div>
+
+                <div class="track-table-wrap">
+                  <table class="track-table">
+                    <thead><tr><th>#</th><th>Title</th><th>BPM</th><th>Key</th><th>Energy</th><th>Match</th><th>Analysis</th><th>Length</th><th><span class="sr-only">Actions</span></th></tr></thead>
+                    <tbody id="trackRows"></tbody>
+                  </table>
+                  <div class="empty-state" id="emptyState" hidden>No tracks match that search.</div>
+                </div>
+              </div>
             </div>
           </section>
         </div>

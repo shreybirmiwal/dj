@@ -33,6 +33,8 @@ const state = {
   },
   controller: { connected: false, native: false, name: null, messages: 0 },
   cue: { available: false, channel: null, level: 0.7, device: null },
+  libraryView: "all",
+  deckOptions: { quantize: true, keyLock: true, slip: false, keySync: true, phraseSync: true },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -47,6 +49,8 @@ let midiAccess = null;
 let midiOutput = null;
 const automationGains = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
 const midiMsb = new Map();
+const waveformCache = new Map();
+const waveformRequests = new Map();
 const JOIN_FADE_SECONDS = 0.35;
 const formatTime = (seconds) => {
   const value = Math.max(0, Math.floor(seconds));
@@ -126,22 +130,26 @@ function applyMixer() {
 }
 
 function makeWaveform() {
-  const waveform = $("#waveform");
-  waveform.innerHTML = "";
-  const bars = Math.max(52, Math.min(100, Math.floor(waveform.clientWidth / 5)));
-  for (let i = 0; i < bars; i += 1) {
-    const bar = document.createElement("i");
-    bar.className = "wave-bar";
-    const harmonic = Math.sin(i * 0.74) * 8 + Math.sin(i * 0.19 + 1) * 6;
-    bar.style.height = `${Math.max(7, 24 + harmonic + ((i * 13) % 17))}px`;
-    bar.dataset.position = i / (bars - 1);
-    waveform.appendChild(bar);
-  }
+  const progress = state.current?.length ? state.elapsed / state.current.length : 0;
+  drawTechnicalWaveform($("#heroWave"), state.current, progress, ["#236f9e", "#42c9ad", "#bd61c9"]);
   updateProgress();
 }
 
-function waveformSeed(track) {
-  return [...`${track?.id || "deck"}${track?.title || ""}`].reduce((value, character) => (value * 31 + character.charCodeAt(0)) >>> 0, 2166136261);
+async function loadWaveform(track) {
+  if (!track || waveformCache.has(String(track.id))) return;
+  const key = String(track.id);
+  if (waveformRequests.has(key)) return waveformRequests.get(key);
+  const request = fetch(`/api/waveforms/${encodeURIComponent(key)}`)
+    .then(response => response.ok ? response.json() : Promise.reject(new Error(`waveform ${response.status}`)))
+    .then(data => {
+      waveformCache.set(key, data);
+      updatePerformanceConsole();
+      return data;
+    })
+    .catch(error => console.error(error))
+    .finally(() => waveformRequests.delete(key));
+  waveformRequests.set(key, request);
+  return request;
 }
 
 function drawTechnicalWaveform(canvas, track, progress, palette) {
@@ -149,28 +157,77 @@ function drawTechnicalWaveform(canvas, track, progress, palette) {
   const context = canvas.getContext("2d");
   const { width, height } = canvas;
   const center = height / 2;
-  const seed = waveformSeed(track);
+  const waveform = waveformCache.get(String(track.id));
   context.clearRect(0, 0, width, height);
-  context.fillStyle = "#080a0d";
+  context.fillStyle = "#06080b";
   context.fillRect(0, 0, width, height);
-  const bars = 260;
-  const barWidth = width / bars;
-  for (let index = 0; index < bars; index += 1) {
-    const position = index / (bars - 1);
-    const pseudo = Math.abs(Math.sin(index * 0.217 + seed * 0.0001) * Math.cos(index * 0.071 + seed * 0.00003));
-    const phrase = 0.48 + 0.52 * Math.abs(Math.sin(index * 0.031 + seed));
-    const amplitude = 10 + pseudo * phrase * center * 0.88;
-    const played = position <= progress;
-    const gradient = context.createLinearGradient(0, center - amplitude, 0, center + amplitude);
-    gradient.addColorStop(0, played ? palette[0] : "#25343a");
-    gradient.addColorStop(0.45, played ? palette[1] : "#2b3b42");
-    gradient.addColorStop(0.55, played ? palette[2] : "#302e3b");
-    gradient.addColorStop(1, played ? palette[0] : "#25343a");
-    context.fillStyle = gradient;
-    context.fillRect(index * barWidth, center - amplitude, Math.max(1, barWidth - 1), amplitude * 2);
+
+  const duration = Number(waveform?.duration || track.length || 0);
+  const phraseSeconds = track.bpm ? (60 / track.bpm) * 32 : 16;
+  if (duration > 0) {
+    let phraseIndex = 0;
+    for (let time = 0; time < duration; time += phraseSeconds) {
+      const x = (time / duration) * width;
+      const nextX = Math.min(width, ((time + phraseSeconds) / duration) * width);
+      context.fillStyle = phraseIndex % 2 ? "rgba(92,115,145,.035)" : "rgba(255,255,255,.012)";
+      context.fillRect(x, 0, nextX - x, height);
+      context.fillStyle = phraseIndex % 4 === 0 ? "rgba(96,184,228,.34)" : "rgba(255,255,255,.11)";
+      context.fillRect(Math.round(x), 0, 1, height);
+      phraseIndex += 1;
+    }
   }
-  context.fillStyle = "rgba(255,255,255,.08)";
+
+  for (const [start, end] of waveform?.vocalSegments || []) {
+    const x = (start / duration) * width;
+    const segmentWidth = ((end - start) / duration) * width;
+    context.fillStyle = "rgba(218,77,116,.2)";
+    context.fillRect(x, 2, Math.max(1, segmentWidth), 5);
+  }
+
+  if (!waveform?.bands?.length) {
+    context.fillStyle = "rgba(115,137,158,.38)";
+    context.fillRect(0, center - 1, width, 2);
+    context.font = "10px IBM Plex Mono";
+    context.fillStyle = "#68727e";
+    context.fillText("DECODING WAVEFORM…", 12, center - 10);
+    loadWaveform(track);
+    return;
+  }
+
+  const bands = waveform.bands;
+  const step = width / bands.length;
+  for (let index = 0; index < bands.length; index += 1) {
+    const position = index / Math.max(1, bands.length - 1);
+    const played = position <= progress;
+    const [low, mid, high] = bands[index];
+    const components = [low, mid, high].map(value => Math.max(0.35, value * center * 2.75));
+    let inner = 0;
+    const colors = played ? palette : ["#294353", "#31534f", "#40394e"];
+    for (let band = 0; band < components.length; band += 1) {
+      const outer = Math.min(center - 2, inner + components[band]);
+      context.fillStyle = colors[band];
+      context.fillRect(index * step, center - outer, Math.max(1, step + 0.35), outer - inner);
+      context.fillRect(index * step, center + inner, Math.max(1, step + 0.35), outer - inner);
+      inner = outer;
+    }
+  }
+
+  context.fillStyle = "rgba(255,255,255,.14)";
   context.fillRect(0, center, width, 1);
+
+  const marker = (seconds, color, label) => {
+    if (!Number.isFinite(Number(seconds)) || !duration) return;
+    const x = Math.max(0, Math.min(width - 1, (Number(seconds) / duration) * width));
+    context.fillStyle = color;
+    context.fillRect(x, 0, 1.5, height);
+    context.font = "bold 8px IBM Plex Mono";
+    context.fillText(label, Math.min(width - 28, x + 4), 17);
+  };
+  marker(track.cueIn, "#49d6b0", "CUE");
+  marker(track.cueOut, "#ffad46", "MIX");
+  if (track.id === state.current?.id) {
+    readHotCues().forEach((seconds, index) => marker(seconds, "#cf6dff", `H${index + 1}`));
+  }
 }
 
 function currentMixResult() {
@@ -191,7 +248,9 @@ function updatePerformanceConsole() {
   $("#deckAPhrase").textContent = `PHRASE ${String(Math.floor(beat / 32) + 1).padStart(2, "0")} / BAR ${Math.floor((beat % 32) / 4) + 1}.${(beat % 4) + 1}`;
   const progress = current.length ? Math.max(0, Math.min(1, state.elapsed / current.length)) : 0;
   drawTechnicalWaveform($("#deckAWave"), current, progress, ["#2a9ac1", "#55d8ff", "#9974d1"]);
+  drawTechnicalWaveform($("#heroWave"), current, progress, ["#236f9e", "#42c9ad", "#bd61c9"]);
   $(".deck-a .playhead").style.left = `${progress * 100}%`;
+  $(".hero-playhead").style.left = `${progress * 100}%`;
   $("#deckABeatgrid").style.setProperty("--deck-progress", `${progress * 100}%`);
 
   $("#deckBTitle").textContent = next.title;
@@ -202,6 +261,13 @@ function updatePerformanceConsole() {
   const delta = current.bpm && next.bpm ? ((state.masterBpm || current.bpm) / next.bpm - 1) * 100 : 0;
   $("#deckBTempoDelta").textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`;
   drawTechnicalWaveform($("#deckBWave"), next, 0, ["#73519f", "#ad78e1", "#c785b9"]);
+  const nextWaveform = waveformCache.get(String(next.id));
+  $("#deckBGridInfo").textContent = next.bpm ? `GRID ${Number(next.bpm).toFixed(2)} BPM` : "GRID PENDING";
+  $("#deckBVocalInfo").textContent = nextWaveform?.vocalSegments?.length
+    ? `VOCALS ${nextWaveform.vocalSegments.length} REGIONS`
+    : "VOCALS PENDING";
+  loadWaveform(current);
+  loadWaveform(next);
 
   const job = state.mixJob;
   const result = currentMixResult();
@@ -244,9 +310,6 @@ function updateHotCuePads() {
 
 function updateProgress() {
   const progress = state.current.length ? state.elapsed / state.current.length : 0;
-  document.querySelectorAll(".wave-bar").forEach((bar) => {
-    bar.classList.toggle("played", Number(bar.dataset.position) <= progress);
-  });
   $("#elapsed").textContent = formatTime(state.elapsed);
   $("#remaining").textContent = `−${formatTime(state.current.length - state.elapsed)}`;
   const handoff = state.activeHandoff?.result;
@@ -288,17 +351,46 @@ function energyBars(level, mini = false) {
   return `<span class="${mini ? "mini-energy" : "energy-bars"}">${[1,2,3,4,5].map(n => `<i class="${n <= level ? (mini ? "on" : "") : "off"}"></i>`).join("")}</span>`;
 }
 
+function compatibilityScore(track) {
+  if (!state.current || track.id === state.current.id) return 0;
+  let score = 30;
+  if (track.bpm && state.current.bpm) score += Math.max(0, 35 - Math.abs(track.bpm - state.current.bpm) * 4);
+  if (track.camelot && state.current.camelot) {
+    const currentNumber = Number.parseInt(state.current.camelot, 10);
+    const nextNumber = Number.parseInt(track.camelot, 10);
+    const currentMode = state.current.camelot.slice(-1);
+    const nextMode = track.camelot.slice(-1);
+    const distance = Math.min(Math.abs(currentNumber - nextNumber), 12 - Math.abs(currentNumber - nextNumber));
+    if (track.camelot === state.current.camelot) score += 30;
+    else if (currentMode === nextMode && distance === 1) score += 24;
+    else if (currentNumber === nextNumber && currentMode !== nextMode) score += 20;
+  }
+  score += Math.max(0, 8 - Math.abs((track.energy || 3) - (state.current.energy || 3)) * 3);
+  return Math.max(0, Math.min(99, Math.round(score)));
+}
+
 function renderRows() {
   const visible = tracks.filter((track) => {
     const inFilter = state.filter === "All" || track.genre === state.filter;
     const query = state.search.toLowerCase();
-    return inFilter && `${track.title} ${track.artist}`.toLowerCase().includes(query);
+    const analyzed = Boolean(track.bpm && track.camelot && track.length);
+    const score = compatibilityScore(track);
+    const inView = state.libraryView === "all"
+      || (state.libraryView === "analyzed" && analyzed)
+      || (state.libraryView === "energy" && track.energy >= 4)
+      || (state.libraryView === "harmonic" && score >= 78)
+      || (state.libraryView === "ready" && analyzed && track.cueIn != null && track.cueOut != null)
+      || (state.libraryView === "pending" && !analyzed);
+    return inFilter && inView && `${track.title} ${track.artist} ${track.genre}`.toLowerCase().includes(query);
   });
   $("#trackRows").innerHTML = visible.map((track, index) => `
     <tr data-id="${track.id}">
       <td><span class="track-number">${String(index + 1).padStart(2, "0")}</span></td>
       <td><div class="table-title-cell"><div class="cover cover-small cover-${track.cover}">${track.cover === 2 ? '<span class="moon"></span><span class="horizon"></span>' : ""}</div><span><strong>${track.title}</strong><small>${track.artist} · ${track.genre}</small></span></div></td>
-      <td>${track.bpm ?? "—"}</td><td>${track.camelot ?? "—"}</td><td>${energyBars(track.energy, true)}</td><td>${track.length ? formatTime(track.length) : "—"}</td>
+      <td>${track.bpm ?? "—"}</td><td><span class="key-cell">${track.camelot ?? "—"}</span></td><td>${energyBars(track.energy, true)}</td>
+      <td><span class="match-cell">${track.id === state.current.id ? "MASTER" : `${compatibilityScore(track)}%`}</span></td>
+      <td><span class="analysis-cell ${track.bpm && track.camelot ? "ready" : "pending"}"><i></i>${track.bpm && track.camelot ? "READY" : "PENDING"}</span></td>
+      <td>${track.length ? formatTime(track.length) : "—"}</td>
       <td><button class="mix-next-button ${state.queued?.id === track.id ? "selected" : ""}" data-mix-id="${track.id}">${state.queued?.id === track.id ? "Queued ✓" : "Mix next"}</button></td>
     </tr>`).join("");
   $("#emptyState").hidden = visible.length > 0;
@@ -323,6 +415,8 @@ function setSuggestion(track) {
   const button = $("#acceptSuggestion");
   button.classList.toggle("queued", state.queued?.id === track.id);
   button.querySelector("span").textContent = state.queued?.id === track.id ? "Locked in next" : "Mix this next";
+  loadWaveform(track);
+  updatePerformanceConsole();
 }
 
 function queueTrack(track, showToast = true) {
@@ -682,6 +776,19 @@ function setLoopEnabled(enabled, start = null, end = null) {
   $("#loopToggle").textContent = enabled ? "EXIT" : "LOOP";
 }
 
+function beatJump(beats) {
+  const secondsPerBeat = 60 / Math.max(1, Number(state.current?.bpm) || 120);
+  const target = Math.max(0, Math.min(currentAudio.duration || state.current.length || Infinity, currentAudio.currentTime + Number(beats) * secondsPerBeat));
+  currentAudio.currentTime = target;
+  state.elapsed = logicalSourceSeconds();
+  updateProgress();
+}
+
+function toggleDeckOption(name, button) {
+  state.deckOptions[name] = !state.deckOptions[name];
+  button.classList.toggle("active", state.deckOptions[name]);
+}
+
 function cueCurrentDeck() {
   currentAudio.pause();
   currentAudio.currentTime = 0;
@@ -958,8 +1065,20 @@ window.addEventListener("pywebviewready", initializeDesktopRuntime);
 
 $("#trackRows").addEventListener("click", (event) => {
   const button = event.target.closest("[data-mix-id]");
-  if (!button) return;
-  queueTrack(tracks.find(track => String(track.id) === button.dataset.mixId));
+  if (button) {
+    queueTrack(tracks.find(track => String(track.id) === button.dataset.mixId));
+    return;
+  }
+  const row = event.target.closest("tr[data-id]");
+  if (!row) return;
+  document.querySelectorAll("#trackRows tr").forEach(item => item.classList.toggle("focused", item === row));
+  const track = tracks.find(item => String(item.id) === row.dataset.id);
+  if (track && track.id !== state.current.id) setSuggestion(track);
+});
+$("#trackRows").addEventListener("dblclick", event => {
+  const row = event.target.closest("tr[data-id]");
+  const track = row && tracks.find(item => String(item.id) === row.dataset.id);
+  if (track) queueTrack(track);
 });
 
 $("#acceptSuggestion").addEventListener("click", () => queueTrack(state.suggestion));
@@ -989,6 +1108,12 @@ $("#forceMix").addEventListener("click", forceSmartMixNow);
 $("#connectController").addEventListener("click", connectController);
 $("#audioOutput").addEventListener("change", event => selectAudioOutput(event.target.value));
 $("#loopToggle").addEventListener("click", () => setLoopEnabled(!state.loop.enabled));
+document.querySelectorAll("[data-beat-jump]").forEach(button => button.addEventListener("click", () => beatJump(button.dataset.beatJump)));
+$("#quantizeToggle").addEventListener("click", event => toggleDeckOption("quantize", event.currentTarget));
+$("#keyLockToggle").addEventListener("click", event => toggleDeckOption("keyLock", event.currentTarget));
+$("#slipToggle").addEventListener("click", event => toggleDeckOption("slip", event.currentTarget));
+$("#keySyncToggle").addEventListener("click", event => toggleDeckOption("keySync", event.currentTarget));
+$("#phraseSyncToggle").addEventListener("click", event => toggleDeckOption("phraseSync", event.currentTarget));
 document.querySelectorAll("[data-loop-change]").forEach(button => button.addEventListener("click", () => {
   const sizes = [0.25, 0.5, 1, 2, 4, 8, 16, 32];
   const current = sizes.indexOf(state.loop.beats);
@@ -1038,6 +1163,13 @@ $("#smartToggle").addEventListener("change", () => {
     prepareSmartMix(state.queued || state.suggestion);
   }
   updateProgress();
+});
+$(".collection-tree").addEventListener("click", event => {
+  const button = event.target.closest("[data-library-view]");
+  if (!button) return;
+  state.libraryView = button.dataset.libraryView;
+  document.querySelectorAll(".collection-tree [data-library-view]").forEach(item => item.classList.toggle("active", item === button));
+  renderRows();
 });
 $("#waveform").addEventListener("click", (event) => {
   const rect = event.currentTarget.getBoundingClientRect();
@@ -1120,6 +1252,10 @@ function renderFilters() {
     <button class="filter-icon" aria-label="More filters">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
     </button>`;
+  const analyzed = tracks.filter(track => track.bpm && track.camelot).length;
+  $("#analysisCount").textContent = `${analyzed} / ${tracks.length} READY`;
+  $("#treeAllCount").textContent = tracks.length;
+  $("#treeAnalyzedCount").textContent = analyzed;
 }
 
 async function loadCatalog() {
