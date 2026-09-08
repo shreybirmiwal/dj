@@ -17,7 +17,7 @@ import soundfile as sf
 from scipy.signal import butter, sosfilt, sosfiltfilt
 
 from .analysis import TrackAnalysis, analyze_track
-from .intelligence import TrackIntelligence, rank_transition_candidates
+from .intelligence import TrackIntelligence, camelot_compatibility, rank_transition_candidates
 from .stems import VocalMap, choose_vocal_safe_cues, separate_stems, separate_vocals
 
 
@@ -25,6 +25,7 @@ SAMPLE_RATE = 44100
 CHANNELS = 2
 BLOCK_FRAMES = SAMPLE_RATE * 2
 LIMITER_FILTER = "alimiter=limit=0.841395:attack=5:release=80:level=false"
+STEM_TECHNIQUES = frozenset({"stem_phrase", "loop_bridge"})
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class Transition:
     from_section: str | None = None
     to_section: str | None = None
     drop_position: float | None = None
+    harmonic_compatibility: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -280,6 +282,10 @@ def create_plan(
                 from_section=selected_candidate.from_section if selected_candidate else None,
                 to_section=selected_candidate.to_section if selected_candidate else None,
                 drop_position=selected_candidate.drop_position if selected_candidate else None,
+                harmonic_compatibility=round(
+                    camelot_compatibility(left.camelot_key, right.camelot_key),
+                    4,
+                ),
             )
         )
         ranked_candidates.append([candidate.to_dict() for candidate in pair_candidates])
@@ -761,6 +767,7 @@ def mix_four_stem_transition(
     incoming: dict[str, np.ndarray],
     outgoing_gain: float,
     incoming_gain: float,
+    harmonic_compatibility: float = 1.0,
 ) -> np.ndarray:
     """Layer a long transition with independent musical schedules per stem."""
     names = ("vocals", "drums", "bass", "other")
@@ -779,13 +786,22 @@ def mix_four_stem_transition(
     # Drums span almost the whole transition, but equal-power scheduling keeps
     # the combined groove stable. Bass changes only around the middle phrase.
     drum_a, drum_b = _equal_power(_smoothstep((position - 0.04) / 0.92))
-    bass_a, bass_b = _equal_power(_smoothstep((position - 0.38) / 0.24))
+    bass_width = 0.24 if harmonic_compatibility >= 0.5 else 0.10
+    bass_a, bass_b = _equal_power(
+        _smoothstep((position - (0.50 - bass_width / 2.0)) / bass_width)
+    )
 
     # Melodic material crosses later and is filtered to avoid a harmonic pileup.
     other_a = _swept_filter(left["other"], 30.0, 3600.0, "highpass")
     other_b = _swept_filter(right["other"], 650.0, 19000.0, "lowpass")
-    other_gain_a = fade_out(0.22, 0.60)
-    other_gain_b = fade_in(0.30, 0.66)
+    if harmonic_compatibility >= 0.5:
+        other_gain_a = fade_out(0.22, 0.60)
+        other_gain_b = fade_in(0.30, 0.66)
+    else:
+        # Incompatible keys can still share a beat, but not a long melodic
+        # overlap. Clear the old harmony before revealing the new one.
+        other_gain_a = fade_out(0.16, 0.40)
+        other_gain_b = fade_in(0.60, 0.80)
 
     # Never present two lead singers together. The instrumental gap is long
     # enough to finish one lyrical thought before the next vocalist appears.
@@ -803,6 +819,110 @@ def mix_four_stem_transition(
         sum(right.values()),
     )
     return (mixed * 0.90).astype(np.float32)
+
+
+def _best_drum_loop(drums: np.ndarray, beat_frames: int) -> np.ndarray:
+    """Choose a stable two-bar loop from the first half of a transition."""
+    loop_frames = max(64, beat_frames * 8)
+    if len(drums) <= loop_frames:
+        return drums
+    candidates: list[tuple[float, int]] = []
+    search_end = max(loop_frames, len(drums) // 2)
+    for start in range(0, search_end - loop_frames + 1, loop_frames):
+        window = drums[start : start + loop_frames]
+        chunks = np.array_split(window, 8)
+        rms = np.asarray([np.sqrt(np.mean(np.square(chunk)) + 1e-12) for chunk in chunks])
+        energy = float(np.mean(rms))
+        steadiness = 1.0 / (1.0 + 4.0 * float(np.std(rms) / max(energy, 1e-9)))
+        candidates.append((energy * steadiness, start))
+    start = max(candidates)[1] if candidates else 0
+    return drums[start : start + loop_frames]
+
+
+def _repeat_to_length(loop: np.ndarray, frames: int) -> np.ndarray:
+    if len(loop) == 0:
+        return np.zeros((frames, CHANNELS), dtype=np.float32)
+    repeats = math.ceil(frames / len(loop))
+    return np.tile(loop, (repeats, 1))[:frames]
+
+
+def mix_loop_bridge_transition(
+    outgoing: dict[str, np.ndarray],
+    incoming: dict[str, np.ndarray],
+    outgoing_gain: float,
+    incoming_gain: float,
+    *,
+    bars: int,
+    harmonic_compatibility: float = 1.0,
+) -> np.ndarray:
+    """Use a repeated instrumental phrase as a simple third-deck bridge."""
+    names = ("vocals", "drums", "bass", "other")
+    frames = min(*(len(outgoing[name]) for name in names), *(len(incoming[name]) for name in names))
+    left = {name: outgoing[name][:frames] * outgoing_gain for name in names}
+    right = {name: incoming[name][:frames] * incoming_gain for name in names}
+    position = np.linspace(0.0, 1.0, frames, endpoint=False, dtype=np.float32)
+
+    def fade_out(start: float, end: float) -> np.ndarray:
+        return np.cos(_smoothstep((position - start) / (end - start)) * (math.pi / 2.0))[:, None]
+
+    def fade_in(start: float, end: float) -> np.ndarray:
+        return np.sin(_smoothstep((position - start) / (end - start)) * (math.pi / 2.0))[:, None]
+
+    beat_frames = max(1, frames // max(1, bars * 4))
+    loop = _repeat_to_length(_best_drum_loop(left["drums"], beat_frames), frames)
+    loop_gain = fade_in(0.08, 0.22) * fade_out(0.64, 0.84) * 0.78
+
+    # The live outgoing groove hands control to a predictable repeated beat.
+    # The destination drums can then arrive under it without lyrical or melodic
+    # clutter, before the loop disappears and the destination vocalist enters.
+    drum_a = fade_out(0.08, 0.28)
+    drum_b = fade_in(0.28, 0.58)
+    bass_a = fade_out(0.18, 0.44)
+    bass_b = fade_in(0.52, 0.72)
+    other_a = _swept_filter(left["other"], 30.0, 4200.0, "highpass")
+    other_b = _swept_filter(right["other"], 900.0, 19000.0, "lowpass")
+    if harmonic_compatibility >= 0.5:
+        other_gain_a = fade_out(0.12, 0.38)
+        other_gain_b = fade_in(0.50, 0.76)
+    else:
+        other_gain_a = fade_out(0.10, 0.30)
+        other_gain_b = fade_in(0.66, 0.84)
+    vocal_a = fade_out(0.12, 0.32)
+    vocal_b = fade_in(0.70, 0.88)
+
+    mixed = left["drums"] * drum_a + loop * loop_gain + right["drums"] * drum_b
+    mixed += left["bass"] * bass_a + right["bass"] * bass_b
+    mixed += other_a * other_gain_a + other_b * other_gain_b
+    mixed += left["vocals"] * vocal_a + right["vocals"] * vocal_b
+    mixed += _echo_tail(left["vocals"] * vocal_a, beat_frames) * 0.10
+    mixed = _stabilize_transition_energy(mixed, sum(left.values()), sum(right.values()))
+    return (mixed * 0.88).astype(np.float32)
+
+
+def _mix_four_stem_technique(
+    technique: str,
+    outgoing: dict[str, np.ndarray],
+    incoming: dict[str, np.ndarray],
+    outgoing_gain: float,
+    incoming_gain: float,
+    transition: Transition,
+) -> np.ndarray:
+    if technique == "loop_bridge":
+        return mix_loop_bridge_transition(
+            outgoing,
+            incoming,
+            outgoing_gain,
+            incoming_gain,
+            bars=transition.bars,
+            harmonic_compatibility=transition.harmonic_compatibility,
+        )
+    return mix_four_stem_transition(
+        outgoing,
+        incoming,
+        outgoing_gain,
+        incoming_gain,
+        harmonic_compatibility=transition.harmonic_compatibility,
+    )
 
 
 def _drum_alignment_transform(
@@ -889,11 +1009,11 @@ def iter_mix_blocks(
         stem_indices = {
             index
             for index, transition in enumerate(plan.transitions)
-            if transition.technique == "stem_phrase"
+            if transition.technique in STEM_TECHNIQUES
         } | {
             index + 1
             for index, transition in enumerate(plan.transitions)
-            if transition.technique == "stem_phrase"
+            if transition.technique in STEM_TECHNIQUES
         }
         for index in sorted(stem_indices):
             stem_paths = _stretched_four_stems(
@@ -923,7 +1043,7 @@ def iter_mix_blocks(
                 yield (block * gains[index]).astype(np.float32)
                 remaining -= len(block)
 
-            if transition.technique == "stem_phrase":
+            if transition.technique in STEM_TECHNIQUES:
                 left_stems, right_stems, consumed_end = _read_aligned_stems(
                     stem_handles[index],
                     stem_handles[index + 1],
@@ -932,11 +1052,13 @@ def iter_mix_blocks(
                     transition_frames,
                     plan.target_bpm,
                 )
-                yield mix_four_stem_transition(
+                yield _mix_four_stem_technique(
+                    transition.technique,
                     left_stems,
                     right_stems,
                     gains[index],
                     gains[index + 1],
+                    transition,
                 )
                 source_position = consumed_end
             else:
@@ -1096,7 +1218,7 @@ def render_pair_handoff(
             )
             if progress:
                 progress("Rendering the selected transition")
-            if transition.technique == "stem_phrase":
+            if transition.technique in STEM_TECHNIQUES:
                 left_paths = _stretched_four_stems(
                     plan.tracks[0], plan.target_bpm, cache_root / "stems4"
                 )
@@ -1114,11 +1236,13 @@ def render_pair_handoff(
                         transition_frames,
                         plan.target_bpm,
                     )
-                    mixed = mix_four_stem_transition(
+                    mixed = _mix_four_stem_technique(
+                        transition.technique,
                         aligned_left,
                         aligned_right,
                         gains[0],
                         gains[1],
+                        transition,
                     )
                 finally:
                     for handle in (*left_stems.values(), *right_stems.values()):
@@ -1219,11 +1343,11 @@ def render_transition_auditions(
     stem_indices = {
         index
         for index, transition in enumerate(plan.transitions)
-        if transition.technique == "stem_phrase"
+        if transition.technique in STEM_TECHNIQUES
     } | {
         index + 1
         for index, transition in enumerate(plan.transitions)
-        if transition.technique == "stem_phrase"
+        if transition.technique in STEM_TECHNIQUES
     }
     for index in sorted(stem_indices):
         prepared_stems[index] = _stretched_four_stems(
@@ -1255,7 +1379,7 @@ def render_transition_auditions(
             )
             selected_techniques = (transition.technique,) if selected_only else techniques
             for technique in selected_techniques:
-                if technique == "stem_phrase":
+                if technique in STEM_TECHNIQUES:
                     left_stems = {
                         name: sf.SoundFile(path) for name, path in prepared_stems[index].items()
                     }
@@ -1271,11 +1395,19 @@ def render_transition_auditions(
                             frames,
                             plan.target_bpm,
                         )
-                        mixed = mix_four_stem_transition(
+                        audition_transition = Transition(
+                            **{
+                                **asdict(transition),
+                                "technique": technique,
+                            }
+                        )
+                        mixed = _mix_four_stem_technique(
+                            technique,
                             aligned_left,
                             aligned_right,
                             _track_gain(plan.tracks[index]),
                             _track_gain(plan.tracks[index + 1]),
+                            audition_transition,
                         )
                         after = _read_segment(
                             incoming,

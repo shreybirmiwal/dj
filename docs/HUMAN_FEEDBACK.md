@@ -258,6 +258,25 @@ detected vocal-pocket entrance for the future instrumental-bed technique.
   - All transition loudness ranges below 8 dB; worst measured range 7.77 dB.
 - Human acceptance result: pending.
 
+### Technique research: loop bridges and harmonic protection
+- References: Pioneer DJ genre-mixing guide, pro-technique guide, and harmonic
+  mixing interviews (reviewed 2026-09-08).
+- Status: IMPROVED, NEEDS LISTENING
+- General rules tested:
+  - When two arrangements are busy, use a simple repeated drum phrase as a
+    temporary third deck instead of mashing both masters together.
+  - Outgoing vocals leave before the loop becomes dominant; destination vocals
+    enter only after its drums and bass are established.
+  - Camelot-compatible songs may share melodic material. Incompatible pairs
+    keep rhythmic continuity but clear the old melody before revealing the new
+    one, with a tighter bass swap.
+- Objective QA:
+  - 18 engine tests pass, including rhythmic-bed continuity and a synthetic
+    incompatible-melody overlap regression.
+  - Real auditions contain no decoded NaNs, infinities, clipping, or detected
+    half-second regions below -40 dBFS.
+- Human acceptance result: pending for both audition renders.
+
 ## Next implementation priorities
 
 1. Make every transition technique publish an event schedule: outgoing vocal

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .analysis import analyze_track, discover_tracks
 from .engine import (
+    STEM_TECHNIQUES,
     analyze_ordered,
     create_plan,
     render_mix,
@@ -23,6 +24,7 @@ TECHNIQUES = (
     "auto",
     "varied",
     "stem_phrase",
+    "loop_bridge",
     "bass_swap",
     "filter_sweep",
     "highpass_out",
@@ -82,7 +84,7 @@ def _parser() -> argparse.ArgumentParser:
     live.add_argument("--seconds", type=float, help="stop after this many seconds")
     live.add_argument(
         "--technique",
-        choices=tuple(value for value in TECHNIQUES if value not in {"auto", "stem_phrase"}),
+        choices=tuple(value for value in TECHNIQUES if value not in {"auto", *STEM_TECHNIQUES}),
         default="bass_swap",
     )
     live.add_argument(
@@ -187,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         smart = getattr(args, "smart", False)
         needs_vocals = (
             getattr(args, "vocals", False)
-            or getattr(args, "technique", "") == "stem_phrase"
+            or getattr(args, "technique", "") in STEM_TECHNIQUES
             or smart
         )
         if needs_vocals:

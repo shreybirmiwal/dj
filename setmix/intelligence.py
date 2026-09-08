@@ -371,7 +371,7 @@ def _word_boundary_score(
     return float(score), float(distance)
 
 
-def _camelot_score(left: str, right: str) -> float:
+def camelot_compatibility(left: str, right: str) -> float:
     try:
         left_number, left_mode = int(left[:-1]), left[-1]
         right_number, right_mode = int(right[:-1]), right[-1]
@@ -418,6 +418,10 @@ def _select_technique(
 ) -> str:
     if requested not in {"auto", "varied"}:
         return requested
+    # When both records are vocally busy, a repeated instrumental phrase acts
+    # as a third, simpler deck and creates room for a clean singer handoff.
+    if overlap >= 0.55 and left and right and left.vocal_fraction >= 0.25 and right.vocal_fraction >= 0.25:
+        return "loop_bridge"
     # A known destination drop is a stronger musical landmark than global key
     # or beat confidence. Cutting there also avoids a long incompatible mash.
     if drop_position is not None:
@@ -527,7 +531,7 @@ def rank_transition_candidates(
     duration = left.transition_bars * 4.0 * 60.0 / target_bpm
     left_source_duration = duration * target_bpm / left.bpm
     right_source_duration = duration * target_bpm / right.bpm
-    key_score = _camelot_score(left.camelot_key, right.camelot_key)
+    key_score = camelot_compatibility(left.camelot_key, right.camelot_key)
     beat_score = (left.beat_confidence + right.beat_confidence) / 2.0
     tempo_score = max(0.0, 1.0 - abs(left.bpm - right.bpm) / max(left.bpm, right.bpm) / 0.08)
     candidates: list[TransitionCandidate] = []
@@ -597,7 +601,7 @@ def rank_transition_candidates(
                     else 0.0
                 ),
             }
-            if technique == "stem_phrase":
+            if technique in {"stem_phrase", "loop_bridge"}:
                 weights = {
                     "vocal_safety": 0.19,
                     "word_boundaries": 0.15,

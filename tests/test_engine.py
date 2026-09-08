@@ -6,6 +6,7 @@ from setmix.analysis import TrackAnalysis
 from setmix.engine import (
     _drum_alignment_transform,
     mix_four_stem_transition,
+    mix_loop_bridge_transition,
     mix_stem_transition,
     mix_transition,
 )
@@ -144,6 +145,45 @@ def test_four_stem_transition_lifts_an_unexpectedly_empty_center() -> None:
     center_db = 20.0 * np.log10(np.sqrt(np.mean(np.square(center))) + 1e-9)
     edge_db = 20.0 * np.log10(np.sqrt(np.mean(np.square(edge))) + 1e-9)
     assert center_db > edge_db - 12.0
+
+
+def test_harmonic_protection_clears_incompatible_melodies_at_center() -> None:
+    frames = 44100 * 4
+    time = np.arange(frames) / 44100.0
+    empty = np.zeros((frames, 2), dtype="float32")
+    left_tone = np.zeros_like(empty)
+    right_tone = np.zeros_like(empty)
+    left_tone[:, 0] = np.sin(time * 2 * np.pi * 440.0) * 0.1
+    right_tone[:, 1] = np.sin(time * 2 * np.pi * 659.25) * 0.1
+    left = {"vocals": empty, "drums": empty, "bass": empty, "other": left_tone}
+    right = {"vocals": empty, "drums": empty, "bass": empty, "other": right_tone}
+    compatible = mix_four_stem_transition(left, right, 1.0, 1.0, harmonic_compatibility=0.9)
+    protected = mix_four_stem_transition(left, right, 1.0, 1.0, harmonic_compatibility=0.35)
+    middle = slice(frames * 9 // 20, frames * 11 // 20)
+    compatible_rms = float(np.sqrt(np.mean(np.square(compatible[middle]))))
+    protected_rms = float(np.sqrt(np.mean(np.square(protected[middle]))))
+    assert protected_rms < compatible_rms * 0.25
+
+
+def test_loop_bridge_keeps_a_rhythmic_bed_between_vocalists() -> None:
+    frames = 44100 * 8
+    time = np.arange(frames) / 44100.0
+    empty = np.zeros((frames, 2), dtype="float32")
+    drums = np.column_stack((np.sin(time * 2 * np.pi * 120.0),) * 2).astype("float32") * 0.08
+    left_vocal = np.zeros_like(empty)
+    right_vocal = np.zeros_like(empty)
+    left_vocal[:, 0] = 0.08
+    right_vocal[:, 1] = 0.08
+    left = {"vocals": left_vocal, "drums": drums, "bass": empty, "other": empty}
+    right = {"vocals": right_vocal, "drums": drums, "bass": empty, "other": empty}
+    result = mix_loop_bridge_transition(left, right, 1.0, 1.0, bars=4)
+    middle = result[frames * 2 // 5 : frames * 3 // 5]
+    assert result.shape == (frames, 2)
+    assert np.isfinite(result).all()
+    assert float(np.sqrt(np.mean(np.square(middle)))) > 0.025
+    # The center is carried by drums/loop, not two lead vocal constants.
+    assert abs(float(np.mean(middle[:, 0]))) < 0.01
+    assert abs(float(np.mean(middle[:, 1]))) < 0.01
 
 
 def test_drum_alignment_tracks_gradual_tempo_drift() -> None:

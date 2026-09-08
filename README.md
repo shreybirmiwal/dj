@@ -149,9 +149,16 @@ scripts/setmix --bars 8 render examples/house-demo.txt \
 
 Available transition techniques are `bass_swap`, `filter_sweep`, `highpass_out`,
 `lowpass_reveal`, `echo_out`, `loop_filter`, `reverb_tail`, `drop_cut`, and
-`stem_phrase`. `auto` chooses from the neural vocal-overlap
+`stem_phrase`, and `loop_bridge`. `auto` chooses from the neural vocal-overlap
 estimate. The loop is beat-sized; filter movement and echo delay are derived
 from the transition's beat grid.
+
+`loop_bridge` finds a stable two-bar outgoing drum phrase and repeats it as a
+temporary instrumental third deck. It clears the first vocalist, brings the
+destination rhythm in beneath the loop, then removes the loop before revealing
+the destination vocalist. All four-stem transitions also use Camelot
+compatibility: compatible melodies may overlap, while incompatible keys get a
+short drums-first harmonic gap and a tighter bass handoff.
 
 When smart planning finds a confident incoming drop after a sufficient build
 window inside the transition, it
