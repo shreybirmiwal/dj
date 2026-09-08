@@ -32,6 +32,7 @@ const state = {
     lowA: 0.5, lowB: 0.5, filterA: 0.5, filterB: 0.5,
   },
   controller: { connected: false, native: false, name: null, messages: 0 },
+  cue: { available: false, channel: null, level: 0.7, device: null },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -384,6 +385,67 @@ function nativeDesktopApi() {
   return window.pywebview?.api || null;
 }
 
+function updateCueControls(message = null) {
+  document.querySelectorAll("[data-channel-cue]").forEach(button => {
+    button.classList.toggle("active", state.cue.channel === button.dataset.channelCue);
+  });
+  $("#masterCue").classList.toggle("active", state.cue.channel === "A");
+  $("#cueRouteStatus").textContent = message || (state.cue.available
+    ? (state.cue.channel ? `DECK ${state.cue.channel} → USB 3/4` : "USB 3/4 READY")
+    : "CONNECT FLX4 USB");
+}
+
+async function stopHeadphoneCue() {
+  const api = nativeDesktopApi();
+  if (api) await api.stop_headphone_cue();
+  state.cue.channel = null;
+  updateCueControls();
+}
+
+async function toggleHeadphoneCue(channel) {
+  const api = nativeDesktopApi();
+  if (!api) {
+    updateCueControls("NATIVE APP REQUIRED");
+    return;
+  }
+  if (state.cue.channel === channel) {
+    await stopHeadphoneCue();
+    return;
+  }
+  const track = channel === "A" ? state.current : (state.queued || state.suggestion);
+  if (!track) return;
+  const offset = channel === "A" ? logicalSourceSeconds() : Math.max(0, Number(track.cueIn) || 0);
+  updateCueControls("ROUTING CUE…");
+  const result = await api.start_headphone_cue(String(track.id), offset, state.cue.level);
+  if (!result.ok) {
+    state.cue.channel = null;
+    state.cue.available = false;
+    updateCueControls(result.error || "CUE ROUTE FAILED");
+    return;
+  }
+  state.cue.available = true;
+  state.cue.channel = channel;
+  state.cue.device = result.device;
+  updateCueControls();
+}
+
+async function refreshNativeCueOutput() {
+  const api = nativeDesktopApi();
+  if (!api) return;
+  const result = await api.list_audio_outputs();
+  state.cue.available = Boolean(result.ok && result.available);
+  state.cue.device = result.device || null;
+  updateCueControls();
+}
+
+async function setHeadphoneLevel(value) {
+  state.cue.level = Math.max(0, Math.min(1, Number(value)));
+  $("#headphoneLevel").value = state.cue.level;
+  $("#headphoneLevel").style.setProperty("--knob", state.cue.level);
+  const api = nativeDesktopApi();
+  if (api) await api.set_headphone_level(state.cue.level);
+}
+
 function sendMidiFeedback(data) {
   if (midiOutput) {
     midiOutput.send(data);
@@ -689,6 +751,8 @@ function mapMidi14(channel, controller, value) {
     setMixerValue("crossfader", value, { manual: true });
   } else if (channel === 6 && controller === 0x08) {
     setMixerValue("master", value);
+  } else if (channel === 6 && controller === 0x0d) {
+    setHeadphoneLevel(value);
   }
 }
 
@@ -732,7 +796,9 @@ function processMidiNote(channel, note, velocity) {
     }
     if (note === 0x11 && channel === 0) setLoopEnabled(true, state.loop.start, currentAudio.currentTime);
     if (note === 0x4d && channel === 0) setLoopEnabled(!state.loop.enabled);
+    if (note === 0x54) toggleHeadphoneCue(channel === 0 ? "A" : "B");
   }
+  if (channel === 6 && note === 0x63) toggleHeadphoneCue("A");
   if (channel === 6 && [0x41, 0x46, 0x47].includes(note)) queueTrack(state.suggestion);
 }
 
@@ -790,6 +856,7 @@ async function connectController() {
       $("#hardwareStatus").textContent = result.output ? "NATIVE MIDI I/O · READY" : "NATIVE MIDI INPUT · READY";
       setPlaybackState(state.playing, state.playing ? "FLX4 control active" : "FLX4 ready");
       await refreshAudioOutputs();
+      await refreshNativeCueOutput();
       return;
     } catch (error) {
       state.controller.connected = false;
@@ -848,6 +915,7 @@ async function initializeDesktopRuntime() {
   try {
     const info = await api.runtime_info();
     $("#runtimeBadge").textContent = `${String(info.platform).toUpperCase()} DESKTOP`;
+    await refreshNativeCueOutput();
     const devices = await api.list_midi_devices();
     if (devices.ok && devices.flx4Inputs?.length) {
       await connectController();
@@ -871,6 +939,8 @@ async function pollNativeController() {
       await connectController();
     } else if (!detected && state.controller.connected) {
       state.controller.connected = false;
+      await stopHeadphoneCue();
+      state.cue.available = false;
       $("#connectController").classList.remove("connected");
       $("#connectController").classList.add("unsupported");
       $("#hardwareStatus").textContent = "NATIVE MIDI · AWAITING USB";
@@ -911,7 +981,7 @@ $("#heartButton").addEventListener("click", (event) => event.currentTarget.class
 $("#playbackToggle").addEventListener("click", togglePlayback);
 $("#deckAPlay").addEventListener("click", togglePlayback);
 $("#deckACue").addEventListener("click", cueCurrentDeck);
-$("#deckBCue").addEventListener("click", () => queueTrack(state.suggestion, false));
+$("#deckBCue").addEventListener("click", () => toggleHeadphoneCue("B"));
 $("#deckBLoad").addEventListener("click", () => queueTrack(state.suggestion));
 $("#approveNext").addEventListener("click", () => queueTrack(state.suggestion));
 $("#rejectNext").addEventListener("click", () => cycleSuggestion(1));
@@ -949,7 +1019,9 @@ document.querySelectorAll(".pro-mixer input[type=range]").forEach(input => {
   input.style.setProperty("--knob", input.value);
   input.addEventListener("input", () => setMixerValue(input.id, Number(input.value), { manual: input.id.startsWith("fader") || input.id === "crossfader" }));
 });
-document.querySelectorAll("[data-channel-cue]").forEach(button => button.addEventListener("click", () => button.classList.toggle("active")));
+document.querySelectorAll("[data-channel-cue]").forEach(button => button.addEventListener("click", () => toggleHeadphoneCue(button.dataset.channelCue)));
+$("#masterCue").addEventListener("click", () => toggleHeadphoneCue("A"));
+$("#headphoneLevel").addEventListener("input", event => setHeadphoneLevel(event.target.value));
 $("#mixerMode").parentElement.addEventListener("click", () => {
   state.mixer.manual = false;
   applyMixer();

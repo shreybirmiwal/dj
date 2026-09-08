@@ -10,18 +10,24 @@ is connected over USB.
 1. Connect the FLX4's computer/device USB-C port directly to the computer.
 2. Close rekordbox, Serato, and other software that may already own its MIDI ports.
 3. Launch `~/Applications/SetMix.app` or run `scripts/setmix-app`.
-4. Set **DDJ-FLX4** as the macOS sound output if the controller should carry the
-   master audio. SetMix detects the MIDI ports automatically, including when the
-   controller is plugged in after launch.
+4. Set **DDJ-FLX4** as the macOS sound output. This sends the SetMix master to
+   FLX4 USB channels 1/2 and the RCA MASTER OUT. Native cue monitoring uses USB
+   channels 3/4 and the FLX4 headphones socket. SetMix detects MIDI and audio
+   ports automatically, including when the controller is plugged in after launch.
 
 The browser build remains available at `http://localhost:4173`; use current
 Google Chrome for its Web MIDI and explicit output-selection features. The
 desktop build owns MIDI natively, so it does not need browser MIDI permission.
 
-The current desktop audio engine uses one macOS system output. Master playback
-can therefore go through the FLX4, but independent master/headphone cue channels
-are not routed yet. Native multi-channel USB audio and pre-fader headphone cueing
-are the next hardware milestone.
+The desktop app provides a separate pre-fader headphone bus. Press either channel
+`CUE` button to audition that deck without adding it to the master. Deck B starts
+at its analyzed cue-in point. The FLX4 HEADPHONES LEVEL control changes the native
+cue level. Cue audio is deliberately written only to channels 3/4, leaving RCA
+master channels 1/2 untouched.
+
+The RCA outputs are line-level, unbalanced master outputs. Connect them to powered
+speakers or an amplifier, not passive speakers. Start with the FLX4 MASTER LEVEL
+fully down, then raise it slowly. RCA never carries the isolated cue bus.
 
 ## Implemented controls
 
@@ -40,6 +46,9 @@ The mapping follows AlphaTheta's DDJ-FLX4 MIDI message list:
 | Channel trim, EQ, filter and faders | Control the Web Audio mixer |
 | Crossfader | Enter manual override and blend deck channels |
 | Master level | Control the Web Audio master gain |
+| Channel CUE | Send that deck pre-fader to FLX4 headphones on USB 3/4 |
+| MASTER CUE | Monitor the currently playing deck in FLX4 headphones |
+| Headphones level | Control native headphone-cue gain |
 
 Moving a channel fader or the crossfader changes the mixer from AI automation to
 manual override. Click the `MANUAL HARDWARE OVERRIDE` readout to return ownership
@@ -49,3 +58,4 @@ Official references:
 
 - [DDJ-FLX4 driver information](https://support.alphatheta.com/en-us/articles/12410664372121)
 - [DDJ-FLX4 MIDI message list](https://downloads.support.alphatheta.com/software_info/dj-controllers/DDJ-FLX4/DDJ-FLX4_MIDI_message_List_E1.pdf)
+- [DDJ-FLX4 USB connection and output behavior](https://support.alphatheta.com/en-us/articles/22682056443801)

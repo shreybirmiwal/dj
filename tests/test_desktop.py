@@ -58,6 +58,32 @@ class FakeWindow:
         self.scripts.append(script)
 
 
+class FakeCueEngine:
+    def __init__(self):
+        self.started = None
+        self.level = None
+        self.stopped = False
+        self.shutdown_called = False
+
+    def status(self):
+        return {"ok": True, "available": True, "device": "DDJ-FLX4"}
+
+    def start(self, track_id, **options):
+        self.started = (track_id, options)
+        return {"ok": True, "active": True, "trackId": track_id}
+
+    def set_level(self, level):
+        self.level = level
+        return {"ok": True, "level": level}
+
+    def stop(self):
+        self.stopped = True
+        return {"ok": True, "active": False}
+
+    def shutdown(self):
+        self.shutdown_called = True
+
+
 def test_native_bridge_connects_flx4_and_forwards_messages(tmp_path: Path):
     midi = FakeMidi()
     window = FakeWindow()
@@ -91,3 +117,16 @@ def test_native_bridge_reports_missing_controller(tmp_path: Path):
     result = bridge.connect_controller()
     assert result["ok"] is False
     assert "DDJ-FLX4 not detected" in result["error"]
+
+
+def test_native_bridge_exposes_separate_headphone_cue(tmp_path: Path):
+    cue = FakeCueEngine()
+    bridge = DesktopBridge(tmp_path, mido_module=FakeMidi(), cue_engine=cue)
+
+    assert bridge.list_audio_outputs()["available"] is True
+    assert bridge.start_headphone_cue("track-1", 15.0, 0.6)["ok"] is True
+    assert cue.started == ("track-1", {"offset_seconds": 15.0, "level": 0.6})
+    assert bridge.set_headphone_level(0.25) == {"ok": True, "level": 0.25}
+    assert bridge.stop_headphone_cue() == {"ok": True, "active": False}
+    bridge.shutdown()
+    assert cue.shutdown_called is True

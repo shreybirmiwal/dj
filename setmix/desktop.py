@@ -13,6 +13,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .cue_audio import NativeCueEngine
+
 
 FLX4_PATTERN = re.compile(r"DDJ[- ]?FLX4|Pioneer DJ", re.IGNORECASE)
 
@@ -40,13 +42,20 @@ def default_desktop_music_dir() -> Path:
 class DesktopBridge:
     """Methods exposed to the UI plus native MIDI ownership."""
 
-    def __init__(self, music_dir: Path, *, mido_module: Any | None = None) -> None:
+    def __init__(
+        self,
+        music_dir: Path,
+        *,
+        mido_module: Any | None = None,
+        cue_engine: NativeCueEngine | None = None,
+    ) -> None:
         self.music_dir = music_dir
         self._mido = mido_module
         self._window: Any | None = None
         self._input: Any | None = None
         self._output: Any | None = None
         self._lock = threading.Lock()
+        self._cue = cue_engine or NativeCueEngine(music_dir)
 
     def set_window(self, window: Any) -> None:
         self._window = window
@@ -68,8 +77,25 @@ class DesktopBridge:
             "platform": platform.system(),
             "musicDir": str(self.music_dir),
             "midiBackend": "python-rtmidi",
-            "audioMode": "native window / system audio",
+            "audioMode": "system master + native USB 3/4 headphone cue",
         }
+
+    def list_audio_outputs(self) -> dict[str, Any]:
+        return self._cue.status()
+
+    def start_headphone_cue(
+        self,
+        track_id: str,
+        offset_seconds: float = 0,
+        level: float = 0.7,
+    ) -> dict[str, Any]:
+        return self._cue.start(track_id, offset_seconds=offset_seconds, level=level)
+
+    def stop_headphone_cue(self) -> dict[str, Any]:
+        return self._cue.stop()
+
+    def set_headphone_level(self, level: float) -> dict[str, Any]:
+        return self._cue.set_level(level)
 
     def list_midi_devices(self) -> dict[str, Any]:
         try:
@@ -160,6 +186,7 @@ class DesktopBridge:
         self._output = None
 
     def shutdown(self) -> None:
+        self._cue.shutdown()
         with self._lock:
             self._close_ports()
 

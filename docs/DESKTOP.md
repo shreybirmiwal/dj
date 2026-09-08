@@ -18,11 +18,13 @@ browser is involved.
 ## Hardware status
 
 Native FLX4 input/output MIDI, transport, jog, browse/load, loops, sync, channel
-gain/EQ/filter/faders, crossfader, and master level are implemented. MIDI ports
-are detected at launch and polled for USB hot-plug.
+gain/EQ/filter/faders, crossfader, master level, and headphone cue are implemented.
+MIDI ports are detected at launch and polled for USB hot-plug.
 
-Audio currently follows the single macOS system output. Independent FLX4 master
-and headphone cue buses require a native multi-channel audio backend and remain
-to be implemented. The mappings are covered by automated tests, but final feel,
-jog direction, LED behavior, and USB reconnect should also be validated on the
-physical controller.
+Master playback follows the macOS output and should be assigned to the FLX4,
+which uses USB channels 1/2 for its RCA MASTER OUT. A native PortAudio cue engine
+decodes the selected deck with FFmpeg and writes it pre-fader only to FLX4 USB
+channels 3/4. This keeps the speakers and headphones independent. The mappings
+and channel isolation are covered by automated tests, but final gain, latency,
+jog direction, LED behavior, and USB reconnect still need physical-controller
+validation.
