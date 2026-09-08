@@ -59,7 +59,7 @@
       <main>
         <header class="topbar">
           <div class="mobile-brand">setmix</div>
-          <div class="system-readout"><span class="status-led"></span><b id="runtimeBadge">ENGINE</b> 44.1 KHZ / 24 BIT <i>•</i> <b>BUFFER</b> 512</div>
+          <div class="system-readout"><span class="status-led"></span><b id="runtimeBadge">ENGINE</b> <span id="audioFormat">AUDIO IDLE</span> <i>•</i> <b>LOW LATENCY</b></div>
           <div class="live-pill"><span></span> LIVE <b id="sessionTime">01:48:24</b></div>
           <div class="top-actions">
             <button class="hardware-button" id="connectController"><span class="hardware-led"></span><span><b id="hardwareName">DDJ-FLX4</b><small id="hardwareStatus">CONNECT HARDWARE</small></span></button>
@@ -122,14 +122,14 @@
               </article>
 
               <section class="pro-mixer" aria-label="Mixer">
-                <div class="mixer-title"><span>2 CH MIXER</span><b>AI ASSIST</b></div>
+                <div class="mixer-title"><span>2 CH MIXER</span><button id="smartCfxToggle" type="button">SMART CFX</button><b>AI ASSIST</b></div>
                 <div class="mixer-channels">
                   <div class="channel-strip" data-channel="A">
                     <label class="knob-control">TRIM<input type="range" id="trimA" min="0" max="1" step=".01" value=".82" /></label>
                     <label class="knob-control">HI<input type="range" id="highA" min="0" max="1" step=".01" value=".5" /></label>
                     <label class="knob-control">MID<input type="range" id="midA" min="0" max="1" step=".01" value=".5" /></label>
                     <label class="knob-control">LOW<input type="range" id="lowA" min="0" max="1" step=".01" value=".5" /></label>
-                    <label class="knob-control color">FILTER<input type="range" id="filterA" min="0" max="1" step=".01" value=".5" /></label>
+                    <label class="knob-control color" title="DDJ-FLX4 channel 1 CFX">CFX<input type="range" id="filterA" min="0" max="1" step=".01" value=".5" /></label>
                     <div class="channel-meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
                     <label class="line-fader"><input type="range" id="faderA" min="0" max="1" step=".01" value="1" /></label>
                     <button class="channel-cue" data-channel-cue="A">CUE</button>
@@ -139,7 +139,7 @@
                     <label class="knob-control">HI<input type="range" id="highB" min="0" max="1" step=".01" value=".5" /></label>
                     <label class="knob-control">MID<input type="range" id="midB" min="0" max="1" step=".01" value=".5" /></label>
                     <label class="knob-control">LOW<input type="range" id="lowB" min="0" max="1" step=".01" value=".5" /></label>
-                    <label class="knob-control color">FILTER<input type="range" id="filterB" min="0" max="1" step=".01" value=".5" /></label>
+                    <label class="knob-control color" title="DDJ-FLX4 channel 2 CFX">CFX<input type="range" id="filterB" min="0" max="1" step=".01" value=".5" /></label>
                     <div class="channel-meter"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
                     <label class="line-fader"><input type="range" id="faderB" min="0" max="1" step=".01" value="1" /></label>
                     <button class="channel-cue" data-channel-cue="B">CUE</button>

@@ -57,10 +57,13 @@ The mapping follows AlphaTheta's DDJ-FLX4 MIDI message list:
 | Deck 2 PLAY/PAUSE | Trigger the prepared smart transition now |
 | BEAT SYNC | Toggle phrase-aware smart timing |
 | LOOP IN / OUT / 4 BEAT EXIT | Set and toggle the active loop |
-| Jog wheel | Fine seek on the active deck |
+| Tempo fader | Adjust live deck tempo over a ±8% range; MT controls pitch lock |
+| Jog wheel side | Pitch-bend/nudge while playing; fine seek while paused |
+| Jog platter | Touch-and-scrub in vinyl mode, resuming cleanly on release |
 | Browse encoder | Move through the candidate library |
 | Browse/LOAD | Queue the visible candidate |
-| Channel trim, EQ, filter and faders | Control the Web Audio mixer |
+| Channel trim, EQ, CFX and faders | Control the 48 kHz Web Audio mixer |
+| SMART CFX | Toggle the tempo-friendly filter/echo macro |
 | Crossfader | Enter manual override and blend deck channels |
 | Master level | Control the Web Audio master gain |
 | Channel CUE | Send that deck pre-fader to FLX4 headphones on USB 3/4 |
@@ -70,6 +73,11 @@ The mapping follows AlphaTheta's DDJ-FLX4 MIDI message list:
 Moving a channel fader or the crossfader changes the mixer from AI automation to
 manual override. Click the `MANUAL HARDWARE OVERRIDE` readout to return ownership
 to the smart transition engine.
+
+Lyric highlighting is locked to source position rather than wall-clock time. It
+therefore stays aligned when the tempo fader speeds up or slows down playback,
+including across a pre-rendered smart handoff. The deck lyric footer shows the
+active playback multiplier whenever it is not 1.000×.
 
 Official references:
 

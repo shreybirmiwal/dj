@@ -31,6 +31,10 @@ const state = {
     highA: 0.5, highB: 0.5, midA: 0.5, midB: 0.5,
     lowA: 0.5, lowB: 0.5, filterA: 0.5, filterB: 0.5,
   },
+  deckTempo: { A: 0, B: 0 },
+  tempoRange: 0.08,
+  smartCfx: false,
+  jog: { touchA: false, touchB: false, resumeA: false, resumeB: false },
   controller: { connected: false, native: false, name: null, messages: 0 },
   cue: { available: false, channel: null, level: 0.7, device: null },
   libraryView: "all",
@@ -50,6 +54,8 @@ let midiAccess = null;
 let midiOutput = null;
 let hardwareCheckTimer = null;
 const automationGains = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
+const basePlaybackRates = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
+const jogResetTimers = new WeakMap();
 const midiMsb = new Map();
 const waveformCache = new Map();
 const waveformRequests = new Map();
@@ -75,21 +81,38 @@ const formatDeckTime = (seconds) => {
 function ensureAudioGraph() {
   if (audioGraph || !(window.AudioContext || window.webkitAudioContext)) return audioGraph;
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  const context = new AudioContextClass();
+  let context;
+  try {
+    context = new AudioContextClass({ latencyHint: "interactive", sampleRate: 48000 });
+  } catch {
+    context = new AudioContextClass({ latencyHint: "interactive" });
+  }
   const master = context.createGain();
-  master.connect(context.destination);
+  const limiter = context.createDynamicsCompressor();
+  limiter.threshold.value = -1.5;
+  limiter.knee.value = 0;
+  limiter.ratio.value = 20;
+  limiter.attack.value = 0.002;
+  limiter.release.value = 0.08;
+  master.connect(limiter).connect(context.destination);
   const createChannel = (audio) => {
     const source = context.createMediaElementSource(audio);
-    const highpass = context.createBiquadFilter(); highpass.type = "highpass"; highpass.frequency.value = 20;
+    const highpass = context.createBiquadFilter(); highpass.type = "highpass"; highpass.frequency.value = 10; highpass.Q.value = 0.707;
     const low = context.createBiquadFilter(); low.type = "lowshelf"; low.frequency.value = 180;
     const mid = context.createBiquadFilter(); mid.type = "peaking"; mid.frequency.value = 1200; mid.Q.value = 0.8;
     const high = context.createBiquadFilter(); high.type = "highshelf"; high.frequency.value = 6000;
-    const lowpass = context.createBiquadFilter(); lowpass.type = "lowpass"; lowpass.frequency.value = 20000;
+    const lowpass = context.createBiquadFilter(); lowpass.type = "lowpass"; lowpass.frequency.value = context.sampleRate * 0.49; lowpass.Q.value = 0.707;
     const gain = context.createGain();
+    const delay = context.createDelay(1); delay.delayTime.value = 0.23;
+    const feedback = context.createGain(); feedback.gain.value = 0;
+    const wet = context.createGain(); wet.gain.value = 0;
     source.connect(highpass).connect(low).connect(mid).connect(high).connect(lowpass).connect(gain).connect(master);
-    return { audio, highpass, low, mid, high, lowpass, gain };
+    gain.connect(delay).connect(wet).connect(master);
+    delay.connect(feedback).connect(delay);
+    return { audio, highpass, low, mid, high, lowpass, gain, delay, feedback, wet };
   };
-  audioGraph = { context, master, channels: new Map([[audioPrimary, createChannel(audioPrimary)], [audioSecondary, createChannel(audioSecondary)]]) };
+  audioGraph = { context, master, limiter, channels: new Map([[audioPrimary, createChannel(audioPrimary)], [audioSecondary, createChannel(audioSecondary)]]) };
+  $("#audioFormat").textContent = `${(context.sampleRate / 1000).toFixed(1)} KHZ FLOAT DSP`;
   applyMixer();
   return audioGraph;
 }
@@ -115,7 +138,7 @@ function applyMixer() {
     const auto = automationGains.get(audio) ?? 1;
     const fader = mix.manual ? mix[`fader${suffix}`] : 1;
     const trim = Math.min(1.4, mix[`trim${suffix}`] / 0.82);
-    const finalGain = auto * cross * fader * trim * mix.master;
+    const finalGain = auto * cross * fader * trim;
     if (!channel) {
       audio.volume = Math.max(0, Math.min(1, finalGain));
       return;
@@ -126,12 +149,18 @@ function applyMixer() {
     channel.mid.gain.setTargetAtTime(eqGain(mix[`mid${suffix}`]), now, 0.02);
     channel.high.gain.setTargetAtTime(eqGain(mix[`high${suffix}`]), now, 0.02);
     const color = mix[`filter${suffix}`];
-    channel.highpass.frequency.setTargetAtTime(color < 0.5 ? 20 + (0.5 - color) * 3600 : 20, now, 0.02);
-    channel.lowpass.frequency.setTargetAtTime(color > 0.5 ? 20000 - (color - 0.5) * 36000 : 20000, now, 0.02);
+    const distance = Math.abs(color - 0.5) * 2;
+    const centered = distance < 0.025;
+    const highpass = !centered && color > 0.5 ? 20 * Math.pow(220, distance) : 10;
+    const lowpass = !centered && color < 0.5 ? 20000 * Math.pow(0.0125, distance) : audioGraph.context.sampleRate * 0.49;
+    channel.highpass.frequency.setTargetAtTime(Math.min(highpass, 10000), now, 0.015);
+    channel.lowpass.frequency.setTargetAtTime(Math.max(120, lowpass), now, 0.015);
+    channel.wet.gain.setTargetAtTime(state.smartCfx ? distance * 0.3 : 0, now, 0.02);
+    channel.feedback.gain.setTargetAtTime(state.smartCfx ? 0.18 + distance * 0.34 : 0, now, 0.02);
   };
   update(active, "A", crossA);
   update(standby, "B", crossB);
-  if (audioGraph) audioGraph.master.gain.setTargetAtTime(1, audioGraph.context.currentTime, 0.015);
+  if (audioGraph) audioGraph.master.gain.setTargetAtTime(mix.master * 0.92, audioGraph.context.currentTime, 0.015);
   $("#mixerMode").textContent = mix.manual ? "MANUAL HARDWARE OVERRIDE" : "AUTOMATION OWNS MIX";
   $("#mixerMode").parentElement.classList.toggle("manual", mix.manual);
 }
@@ -285,7 +314,9 @@ function renderDeckLyrics(deck, track, second) {
   meta.textContent = `${String(source).toUpperCase()} · ${confidence}% · ${phrases.length} LINES`;
   if (deck === "A") {
     const cleanExit = phrases.find(item => item.end >= second)?.end;
-    hint.textContent = cleanExit == null ? "NO LATER LYRIC BOUNDARY" : `NEXT LYRIC EXIT ${formatDeckTime(cleanExit)}`;
+    const rate = tempoMultiplier("A");
+    const lock = Math.abs(rate - 1) > 0.0005 ? ` · SOURCE-LOCKED @ ${rate.toFixed(3)}×` : "";
+    hint.textContent = (cleanExit == null ? "NO LATER LYRIC BOUNDARY" : `NEXT LYRIC EXIT ${formatDeckTime(cleanExit)}`) + lock;
   } else {
     const entry = phrases.find(item => item.start >= second)?.start;
     hint.textContent = entry == null ? "NO VOCAL ENTRY AFTER CUE" : `VOCAL ENTRY ${formatDeckTime(entry)} · +${Math.max(0, entry - second).toFixed(1)}S`;
@@ -405,7 +436,8 @@ function updatePerformanceConsole() {
   $("#deckATitle").textContent = current.title;
   $("#deckAArtist").textContent = current.artist;
   $("#deckAKey").textContent = current.camelot || current.key || "—";
-  $("#deckABpm").textContent = current.bpm ? Number(current.bpm).toFixed(1) : "—";
+  $("#deckABpm").textContent = current.bpm ? (Number(current.bpm) * tempoMultiplier("A")).toFixed(1) : "—";
+  $("#deckABpm").title = `${state.deckTempo.A >= 0 ? "+" : ""}${(state.deckTempo.A * 100).toFixed(2)}% · lyrics source-locked`;
   $("#deckATime").textContent = formatDeckTime(state.elapsed);
   $("#deckARemaining").textContent = `-${formatDeckTime((current.length || 0) - state.elapsed)}`;
   const beat = current.bpm ? Math.floor(state.elapsed / (60 / current.bpm)) : 0;
@@ -420,7 +452,7 @@ function updatePerformanceConsole() {
   $("#deckBTitle").textContent = next.title;
   $("#deckBArtist").textContent = next.artist;
   $("#deckBKey").textContent = next.camelot || next.key || "—";
-  $("#deckBBpm").textContent = next.bpm ? Number(next.bpm).toFixed(1) : "—";
+  $("#deckBBpm").textContent = next.bpm ? (Number(next.bpm) * tempoMultiplier("B")).toFixed(1) : "—";
   $("#deckBLength").textContent = `-${formatDeckTime(next.length || 0)}`;
   const delta = current.bpm && next.bpm ? ((state.masterBpm || current.bpm) / next.bpm - 1) * 100 : 0;
   $("#deckBTempoDelta").textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`;
@@ -626,6 +658,37 @@ function renderCurrentTrack(track, { preserveQueue = false } = {}) {
   renderRows();
 }
 
+function tempoMultiplier(deck = "A") {
+  return 1 + (state.deckTempo[deck] || 0);
+}
+
+function targetPlaybackRate(audio = currentAudio, deck = "A") {
+  const base = basePlaybackRates.get(audio) || 1;
+  return Math.max(0.5, Math.min(2, base * tempoMultiplier(deck)));
+}
+
+function applyPlaybackRate(audio = currentAudio, deck = "A") {
+  audio.playbackRate = targetPlaybackRate(audio, deck);
+  audio.preservesPitch = Boolean(state.deckOptions.keyLock);
+  if ("webkitPreservesPitch" in audio) audio.webkitPreservesPitch = Boolean(state.deckOptions.keyLock);
+}
+
+function updateTempoReadout() {
+  const rate = tempoMultiplier("A");
+  const bpm = Number(state.current?.bpm);
+  $("#deckABpm").textContent = bpm ? (bpm * rate).toFixed(1) : "—";
+  $("#deckABpm").title = `${state.deckTempo.A >= 0 ? "+" : ""}${(state.deckTempo.A * 100).toFixed(2)}% · lyrics source-locked`;
+  const nextBpm = Number((state.queued || state.suggestion)?.bpm);
+  if (nextBpm) $("#deckBBpm").textContent = (nextBpm * tempoMultiplier("B")).toFixed(1);
+}
+
+function setDeckTempo(deck, position) {
+  const centered = Math.abs(position - 0.5) < 0.0025 ? 0.5 : position;
+  state.deckTempo[deck] = (centered - 0.5) * state.tempoRange * 2;
+  if (deck === "A") applyPlaybackRate(currentAudio, "A");
+  updateTempoReadout();
+}
+
 function loadAudio(track, audio = currentAudio) {
   const target = new URL(track.mediaUrl, window.location.href).href;
   if (audio.src !== target) {
@@ -633,8 +696,8 @@ function loadAudio(track, audio = currentAudio) {
     audio.load();
   }
   const rate = state.masterBpm && track.bpm ? state.masterBpm / track.bpm : 1;
-  audio.playbackRate = Math.max(0.5, Math.min(2, rate));
-  audio.preservesPitch = true;
+  basePlaybackRates.set(audio, Math.max(0.5, Math.min(2, rate)));
+  applyPlaybackRate(audio, audio === currentAudio ? "A" : "B");
 }
 
 function setPlaybackState(playing, label) {
@@ -957,7 +1020,8 @@ async function maybeJoinPreparedHandoff() {
   const incoming = currentAudio === audioPrimary ? audioSecondary : audioPrimary;
   try {
     incoming.src = result.mediaUrl;
-    incoming.playbackRate = 1;
+    basePlaybackRates.set(incoming, 1);
+    applyPlaybackRate(incoming, "A");
     incoming.load();
     await waitForMetadata(incoming);
     incoming.currentTime = Math.max(0, stretchedPosition - result.handoff_start);
@@ -982,6 +1046,7 @@ async function maybeJoinPreparedHandoff() {
       }
       outgoing.pause();
       currentAudio = incoming;
+      applyPlaybackRate(currentAudio, "A");
       setAutomationGain(outgoing, 0);
       setAutomationGain(incoming, 1);
       state.activeHandoff = { ...prepared, promoted: false };
@@ -1108,6 +1173,7 @@ function beatJump(beats) {
 function toggleDeckOption(name, button) {
   state.deckOptions[name] = !state.deckOptions[name];
   button.classList.toggle("active", state.deckOptions[name]);
+  if (name === "keyLock") applyPlaybackRate(currentAudio, "A");
 }
 
 function cueCurrentDeck() {
@@ -1129,6 +1195,8 @@ async function forceSmartMixNow() {
   const result = prepared.result;
   outgoing.pause();
   incoming.src = result.mediaUrl;
+  basePlaybackRates.set(incoming, 1);
+  applyPlaybackRate(incoming, "A");
   incoming.load();
   await waitForMetadata(incoming);
   incoming.currentTime = Math.max(0, result.transition_offset);
@@ -1172,16 +1240,68 @@ function mapMidi14(channel, controller, value) {
   if (channel <= 1) {
     const suffix = channel === 0 ? "A" : "B";
     const mappings = { 0x04: `trim${suffix}`, 0x07: `high${suffix}`, 0x0b: `mid${suffix}`, 0x0f: `low${suffix}`, 0x13: `fader${suffix}` };
-    const filterController = channel === 0 ? 0x17 : 0x18;
-    const name = controller === filterController ? `filter${suffix}` : mappings[controller];
+    if (controller === 0x00) {
+      setDeckTempo(suffix, value);
+      return;
+    }
+    const name = mappings[controller];
     if (name) setMixerValue(name, value, { manual: name.startsWith("fader") });
   } else if (channel === 6 && controller === 0x1f) {
     setMixerValue("crossfader", value, { manual: true });
+  } else if (channel === 6 && controller === 0x17) {
+    setMixerValue("filterA", value);
+  } else if (channel === 6 && controller === 0x18) {
+    setMixerValue("filterB", value);
   } else if (channel === 6 && controller === 0x08) {
     setMixerValue("master", value);
   } else if (channel === 6 && controller === 0x0d) {
     setHeadphoneLevel(value);
   }
+}
+
+function midiRelativeDelta(value) {
+  return value === 0x40 ? 0 : value - 0x40;
+}
+
+function scrubCurrentDeck(delta, scale = 0.028) {
+  const duration = currentAudio.duration || state.current?.length || Infinity;
+  currentAudio.currentTime = Math.max(0, Math.min(duration, currentAudio.currentTime + delta * scale));
+  state.elapsed = logicalSourceSeconds();
+  updateProgress();
+}
+
+function nudgeCurrentDeck(delta) {
+  if (!delta) return;
+  if (!state.playing || state.jog.touchA) {
+    scrubCurrentDeck(delta, state.jog.touchA ? 0.045 : 0.028);
+    return;
+  }
+  const base = targetPlaybackRate(currentAudio, "A");
+  const bend = Math.max(-0.12, Math.min(0.12, delta * 0.008));
+  currentAudio.playbackRate = Math.max(0.5, Math.min(2, base * (1 + bend)));
+  clearTimeout(jogResetTimers.get(currentAudio));
+  jogResetTimers.set(currentAudio, setTimeout(() => applyPlaybackRate(currentAudio, "A"), 90));
+}
+
+function setJogTouch(channel, pressed) {
+  const suffix = channel === 0 ? "A" : "B";
+  state.jog[`touch${suffix}`] = pressed;
+  if (channel !== 0) return;
+  if (pressed) {
+    state.jog.resumeA = state.playing && !currentAudio.paused;
+    if (state.jog.resumeA) currentAudio.pause();
+  } else if (state.jog.resumeA && state.playing) {
+    state.jog.resumeA = false;
+    applyPlaybackRate(currentAudio, "A");
+    currentAudio.play().catch(error => console.error(error));
+  }
+}
+
+function toggleSmartCfx() {
+  state.smartCfx = !state.smartCfx;
+  $("#smartCfxToggle").classList.toggle("active", state.smartCfx);
+  $("#smartCfxToggle").textContent = state.smartCfx ? "SMART CFX ON" : "SMART CFX";
+  applyMixer();
 }
 
 function processMidiControl(channel, controller, value) {
@@ -1190,10 +1310,7 @@ function processMidiControl(channel, controller, value) {
     return;
   }
   if (channel <= 1 && [0x21, 0x22, 0x23].includes(controller)) {
-    if (channel === 0) {
-      const delta = value - 0x40;
-      currentAudio.currentTime = Math.max(0, Math.min(currentAudio.duration || Infinity, currentAudio.currentTime + delta * 0.035));
-    }
+    if (channel === 0) nudgeCurrentDeck(midiRelativeDelta(value));
     return;
   }
   if (controller < 0x20) {
@@ -1208,6 +1325,10 @@ function processMidiControl(channel, controller, value) {
 }
 
 function processMidiNote(channel, note, velocity) {
+  if (channel <= 1 && note === 0x36) {
+    setJogTouch(channel, Boolean(velocity));
+    return;
+  }
   if (!velocity) return;
   if (channel <= 1) {
     if (note === 0x0b) channel === 0 ? togglePlayback() : forceSmartMixNow();
@@ -1226,6 +1347,7 @@ function processMidiNote(channel, note, velocity) {
     if (note === 0x4d && channel === 0) setLoopEnabled(!state.loop.enabled);
     if (note === 0x54) toggleHeadphoneCue(channel === 0 ? "A" : "B");
   }
+  if (channel === 6 && note === 0x00) toggleSmartCfx();
   if (channel === 6 && note === 0x63) toggleHeadphoneCue("A");
   if (channel === 6 && [0x41, 0x46, 0x47].includes(note)) queueTrack(state.suggestion);
 }
@@ -1442,6 +1564,7 @@ $("#lyricsViewToggle").addEventListener("click", event => {
   const expanded = $(".performance-console").classList.toggle("lyrics-expanded");
   event.currentTarget.classList.toggle("active", expanded);
 });
+$("#smartCfxToggle").addEventListener("click", toggleSmartCfx);
 $("#analyzeLyricsA").addEventListener("click", () => analyzeLyrics(state.current));
 $("#analyzeLyricsB").addEventListener("click", () => analyzeLyrics(state.queued || state.suggestion));
 document.querySelectorAll("[data-beat-jump]").forEach(button => button.addEventListener("click", () => beatJump(button.dataset.beatJump)));
