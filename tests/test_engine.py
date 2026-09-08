@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from setmix.engine import mix_four_stem_transition, mix_stem_transition, mix_transition
+from setmix.engine import (
+    _drum_alignment_transform,
+    mix_four_stem_transition,
+    mix_stem_transition,
+    mix_transition,
+)
 
 
 def test_transition_has_expected_shape_and_finite_samples() -> None:
@@ -76,3 +81,20 @@ def test_four_stem_transition_is_finite() -> None:
     assert result.shape == (frames, 2)
     assert np.isfinite(result).all()
     assert float(np.max(np.abs(result))) < 1.0
+
+
+def test_drum_alignment_tracks_gradual_tempo_drift() -> None:
+    sample_rate = 44100
+    seconds = 64
+    frames = sample_rate * seconds
+    outgoing = np.zeros((frames, 2), dtype="float32")
+    incoming = np.zeros((frames, 2), dtype="float32")
+    click = np.asarray([1.0, 0.65, 0.35, 0.15], dtype="float32")
+    for beat in np.arange(0.5, seconds - 0.5, 0.5):
+        left = round(beat * sample_rate)
+        right = round((0.06 + beat * 1.002) * sample_rate)
+        outgoing[left : left + len(click)] = click[:, None]
+        incoming[right : right + len(click)] = click[:, None]
+    intercept, slope = _drum_alignment_transform(outgoing, incoming, 120.0)
+    assert abs(intercept - 0.06) < 0.025
+    assert abs(slope - 0.002) < 0.001

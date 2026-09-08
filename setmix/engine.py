@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
+import librosa
 import numpy as np
 import soundfile as sf
 from scipy.signal import butter, sosfilt, sosfiltfilt
@@ -37,6 +38,9 @@ class Transition:
     tempo_ratio_to: float
     technique: str = "bass_swap"
     vocal_overlap: float | None = None
+    phase_adjustment_ms: float = 0.0
+    local_bpm_from: float | None = None
+    local_bpm_to: float | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,14 @@ class MixPlan:
             "transitions": [asdict(item) for item in self.transitions],
             "estimated_duration": self.estimated_duration,
         }
+
+
+def _tempo_at(track: TrackAnalysis, second: float) -> float:
+    if not track.tempo_map:
+        return track.bpm
+    times = np.asarray([item[0] for item in track.tempo_map], dtype=np.float64)
+    tempos = np.asarray([item[1] for item in track.tempo_map], dtype=np.float64)
+    return float(np.interp(second, times, tempos))
 
 
 def analyze_ordered(
@@ -122,9 +134,28 @@ def create_plan(
                 vocal_maps[left.path],
                 vocal_maps[right.path],
             )
+        left_local_bpm = _tempo_at(left, left_source_cue)
+        right_local_bpm = _tempo_at(right, right_source_cue)
+        duration = left.transition_bars * 4.0 * 60.0 / target
+        left_phase = _local_transient_phase(
+            left.path,
+            left_source_cue,
+            left_local_bpm,
+            duration * left_ratio,
+        )
+        right_phase = _local_transient_phase(
+            right.path,
+            right_source_cue,
+            right_local_bpm,
+            duration * right_ratio,
+        )
+        source_shift = right_phase - right_ratio * left_phase / left_ratio
+        source_shift = float(np.clip(source_shift, -0.12, 0.12))
+        if abs(source_shift / right_ratio) < 0.04:
+            source_shift = 0.0
+        right_source_cue = max(0.0, right_source_cue + source_shift)
         left_cue = left_source_cue / left_ratio
         right_cue = right_source_cue / right_ratio
-        duration = left.transition_bars * 4.0 * 60.0 / target
         selected = technique
         if technique == "varied":
             selected = varied_techniques[transition_index % len(varied_techniques)]
@@ -162,6 +193,9 @@ def create_plan(
                 tempo_ratio_to=round(right_ratio, 8),
                 technique=selected,
                 vocal_overlap=vocal_overlap,
+                phase_adjustment_ms=round(source_shift / right_ratio * 1000.0, 3),
+                local_bpm_from=round(left_local_bpm, 6),
+                local_bpm_to=round(right_local_bpm, 6),
             )
         )
         set_time += duration
@@ -243,6 +277,37 @@ def _stretched_four_stems(
 def _track_gain(track: TrackAnalysis, target_db: float = -15.0) -> float:
     gain_db = float(np.clip(target_db - track.rms_db, -6.0, 6.0))
     return float(10.0 ** (gain_db / 20.0))
+
+
+def _local_transient_phase(
+    path: str,
+    cue: float,
+    bpm: float,
+    duration: float,
+) -> float:
+    """Measure the median attack displacement around a chosen beat phrase."""
+    margin = 0.12
+    y, sr = librosa.load(
+        path,
+        sr=22050,
+        mono=True,
+        offset=max(0.0, cue - margin),
+        duration=duration + 2.0 * margin,
+    )
+    hop = 64
+    onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    period = 60.0 / bpm
+    offsets: list[float] = []
+    for beat in np.arange(margin, max(margin, len(y) / sr - margin), period):
+        center = round(beat * sr / hop)
+        radius = max(1, round(0.08 * sr / hop))
+        left = max(0, center - radius)
+        right = min(len(onset), center + radius + 1)
+        if right <= left:
+            continue
+        peak = left + int(np.argmax(onset[left:right]))
+        offsets.append((peak - center) * hop / sr)
+    return float(np.median(offsets)) if offsets else 0.0
 
 
 def _read_segment(handle: sf.SoundFile, start: int, frames: int) -> np.ndarray:
@@ -488,27 +553,97 @@ def mix_four_stem_transition(
 
     # Drums span almost the whole transition, but equal-power scheduling keeps
     # the combined groove stable. Bass changes only around the middle phrase.
-    drum_a, drum_b = _equal_power(_smoothstep((position - 0.06) / 0.88))
-    bass_a = fade_out(0.38, 0.50)
-    bass_b = fade_in(0.50, 0.62)
+    drum_a, drum_b = _equal_power(_smoothstep((position - 0.04) / 0.92))
+    bass_a, bass_b = _equal_power(_smoothstep((position - 0.38) / 0.24))
 
     # Melodic material crosses later and is filtered to avoid a harmonic pileup.
     other_a = _swept_filter(left["other"], 30.0, 3600.0, "highpass")
     other_b = _swept_filter(right["other"], 650.0, 19000.0, "lowpass")
-    other_gain_a = fade_out(0.28, 0.62)
-    other_gain_b = fade_in(0.38, 0.72)
+    other_gain_a = fade_out(0.22, 0.60)
+    other_gain_b = fade_in(0.30, 0.66)
 
     # Never present two lead singers together. The instrumental gap is long
     # enough to finish one lyrical thought before the next vocalist appears.
-    vocal_gain_a = fade_out(0.16, 0.34)
-    vocal_gain_b = fade_in(0.68, 0.86)
+    vocal_gain_a = fade_out(0.24, 0.42)
+    vocal_gain_b = fade_in(0.48, 0.68)
 
     mixed = left["drums"] * drum_a + right["drums"] * drum_b
     mixed += left["bass"] * bass_a + right["bass"] * bass_b
     mixed += other_a * other_gain_a + other_b * other_gain_b
     mixed += left["vocals"] * vocal_gain_a + right["vocals"] * vocal_gain_b
-    mixed += _reverb_tail(left["vocals"] * vocal_gain_a) * 0.16
+    mixed += _reverb_tail(left["vocals"] * vocal_gain_a) * 0.12
     return (mixed * 0.90).astype(np.float32)
+
+
+def _drum_alignment_transform(
+    outgoing: np.ndarray,
+    incoming: np.ndarray,
+    bpm: float,
+) -> tuple[float, float]:
+    """Return reliable phase and drift corrections from isolated drum stems."""
+    hop = 128
+    left = librosa.onset.onset_strength(y=np.mean(outgoing, axis=1), sr=SAMPLE_RATE, hop_length=hop)
+    right = librosa.onset.onset_strength(y=np.mean(incoming, axis=1), sr=SAMPLE_RATE, hop_length=hop)
+    frames_per_block = round(8.0 * 4.0 * 60.0 / bpm * SAMPLE_RATE / hop)
+    radius = round(0.25 * SAMPLE_RATE / hop)
+    lags: list[float] = []
+    times: list[float] = []
+    for block in range(4):
+        start = block * frames_per_block
+        end = min(len(left), len(right), (block + 1) * frames_per_block)
+        if end - start < frames_per_block // 2:
+            break
+        first = left[start:end]
+        second = right[start:end]
+        first = (first - np.mean(first)) / (np.std(first) + 1e-9)
+        second = (second - np.mean(second)) / (np.std(second) + 1e-9)
+        scores: list[float] = []
+        candidates = range(-radius, radius + 1)
+        for lag in candidates:
+            if lag < 0:
+                score = np.dot(first[-lag:], second[: len(second) + lag])
+            elif lag > 0:
+                score = np.dot(first[: len(first) - lag], second[lag:])
+            else:
+                score = np.dot(first, second)
+            scores.append(float(score))
+        lag = list(candidates)[int(np.argmax(scores))] * hop / SAMPLE_RATE
+        lags.append(lag)
+        times.append((block + 0.5) * frames_per_block * hop / SAMPLE_RATE)
+    if len(lags) < 4:
+        return 0.0, 0.0
+    slope, intercept = np.polyfit(times, lags, 1)
+    predicted = np.polyval((slope, intercept), times)
+    variance = float(np.sum(np.square(np.asarray(lags) - np.mean(lags))))
+    residual = float(np.sum(np.square(np.asarray(lags) - predicted)))
+    r_squared = 1.0 - residual / max(variance, 1e-9)
+    if r_squared < 0.90 or (abs(intercept) < 0.025 and abs(slope) < 0.0008):
+        return 0.0, 0.0
+    return float(np.clip(intercept, -0.20, 0.20)), float(np.clip(slope, -0.005, 0.005))
+
+
+def _read_aligned_stems(
+    outgoing: dict[str, sf.SoundFile],
+    incoming: dict[str, sf.SoundFile],
+    cue_from: int,
+    cue_to: int,
+    frames: int,
+    bpm: float,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], int]:
+    left = {name: _read_segment(handle, cue_from, frames) for name, handle in outgoing.items()}
+    right_probe = _read_segment(incoming["drums"], cue_to, frames)
+    intercept, slope = _drum_alignment_transform(left["drums"], right_probe, bpm)
+    positions = cue_to + intercept * SAMPLE_RATE + np.arange(frames, dtype=np.float64) * (1.0 + slope)
+    source_start = max(0, math.floor(float(positions[0])) - 2)
+    relative = positions - source_start
+    source_frames = math.ceil(float(positions[-1])) - source_start + 3
+    right: dict[str, np.ndarray] = {}
+    for name, handle in incoming.items():
+        source = _read_segment(handle, source_start, source_frames)
+        channels = [np.interp(relative, np.arange(len(source)), source[:, channel]) for channel in range(CHANNELS)]
+        right[name] = np.column_stack(channels).astype(np.float32)
+    consumed_end = round(float(positions[-1]) + 1.0 + slope)
+    return left, right, consumed_end
 
 
 def iter_mix_blocks(
@@ -559,18 +694,21 @@ def iter_mix_blocks(
                 remaining -= len(block)
 
             if transition.technique == "stem_phrase":
+                left_stems, right_stems, consumed_end = _read_aligned_stems(
+                    stem_handles[index],
+                    stem_handles[index + 1],
+                    cue_from,
+                    cue_to,
+                    transition_frames,
+                    plan.target_bpm,
+                )
                 yield mix_four_stem_transition(
-                    {
-                        name: _read_segment(handle, cue_from, transition_frames)
-                        for name, handle in stem_handles[index].items()
-                    },
-                    {
-                        name: _read_segment(handle, cue_to, transition_frames)
-                        for name, handle in stem_handles[index + 1].items()
-                    },
+                    left_stems,
+                    right_stems,
                     gains[index],
                     gains[index + 1],
                 )
+                source_position = consumed_end
             else:
                 left = _read_segment(outgoing, cue_from, transition_frames)
                 right = _read_segment(incoming, cue_to, transition_frames)
@@ -582,7 +720,7 @@ def iter_mix_blocks(
                     transition.technique,
                     transition.bars,
                 )
-            source_position = cue_to + transition_frames
+                source_position = cue_to + transition_frames
 
         final = handles[-1]
         end = min(len(final), round(plan.tracks[-1].active_end / (plan.target_bpm / plan.tracks[-1].bpm) * SAMPLE_RATE))
@@ -740,18 +878,21 @@ def render_transition_auditions(
                         name: sf.SoundFile(path) for name, path in prepared_stems[index + 1].items()
                     }
                     try:
+                        aligned_left, aligned_right, consumed_end = _read_aligned_stems(
+                            left_stems,
+                            right_stems,
+                            cue_from,
+                            cue_to,
+                            frames,
+                            plan.target_bpm,
+                        )
                         mixed = mix_four_stem_transition(
-                            {
-                                name: _read_segment(handle, cue_from, frames)
-                                for name, handle in left_stems.items()
-                            },
-                            {
-                                name: _read_segment(handle, cue_to, frames)
-                                for name, handle in right_stems.items()
-                            },
+                            aligned_left,
+                            aligned_right,
                             _track_gain(plan.tracks[index]),
                             _track_gain(plan.tracks[index + 1]),
                         )
+                        after = _read_segment(incoming, consumed_end, context_frames)
                     finally:
                         for handle in (*left_stems.values(), *right_stems.values()):
                             handle.close()

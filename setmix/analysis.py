@@ -31,6 +31,7 @@ class TrackAnalysis:
     musical_key: str = "unknown"
     camelot_key: str = "unknown"
     key_confidence: float = 0.0
+    tempo_map: list[list[float]] | None = None
 
     @property
     def transition_seconds(self) -> float:
@@ -39,7 +40,7 @@ class TrackAnalysis:
 
 def _cache_key(path: Path, transition_bars: int) -> str:
     stat = path.stat()
-    value = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{transition_bars}:v8"
+    value = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{transition_bars}:v9"
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
@@ -55,10 +56,7 @@ def _normalize_grid(tempo: float, beats: np.ndarray) -> tuple[float, np.ndarray]
     return tempo, beats
 
 
-def _refined_tempo(y: np.ndarray, sr: int, fallback: float) -> tuple[float, np.ndarray, int]:
-    """Estimate dance tempo on a fine grid instead of the coarse default hop."""
-    hop = 64
-    onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+def _tempo_from_onset(onset: np.ndarray, sr: int, hop: int, fallback: float) -> float:
     onset = onset - float(np.mean(onset))
     maximum_lag = int(60.0 * sr / hop / 80.0)
     autocorrelation = librosa.autocorrelate(onset, max_size=maximum_lag)
@@ -76,8 +74,43 @@ def _refined_tempo(y: np.ndarray, sr: int, fallback: float) -> tuple[float, np.n
         prior = math.exp(-0.5 * (distance / 0.16) ** 2)
         candidates.append((float(center) * prior, bpm))
     if not candidates:
-        return fallback, onset, hop
-    return max(candidates)[1], onset, hop
+        return fallback
+    return max(candidates)[1]
+
+
+def _refined_tempo(y: np.ndarray, sr: int, fallback: float) -> tuple[float, np.ndarray, int]:
+    """Estimate dance tempo on a fine grid instead of the coarse default hop."""
+    hop = 64
+    onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    return _tempo_from_onset(onset, sr, hop, fallback), onset, hop
+
+
+def _local_tempo_map(
+    onset: np.ndarray,
+    sr: int,
+    hop: int,
+    global_bpm: float,
+    duration: float,
+) -> list[list[float]]:
+    """Measure local tempo once per eight-bar phrase with overlapping context."""
+    phrase_seconds = 8.0 * 4.0 * 60.0 / global_bpm
+    window_seconds = 2.0 * phrase_seconds
+    values: list[list[float]] = []
+    for start in np.arange(0.0, duration, phrase_seconds):
+        left = max(0, round((start - phrase_seconds / 2.0) * sr / hop))
+        right = min(len(onset), round((start - phrase_seconds / 2.0 + window_seconds) * sr / hop))
+        if right - left < round(8.0 * sr / hop):
+            continue
+        bpm = _tempo_from_onset(onset[left:right], sr, hop, global_bpm)
+        if abs(bpm / global_bpm - 1.0) > 0.08:
+            bpm = global_bpm
+        values.append([round(float(start), 3), float(bpm)])
+    if not values:
+        return [[0.0, round(global_bpm, 6)]]
+    raw = np.asarray([value[1] for value in values])
+    padded = np.pad(raw, (1, 1), mode="edge")
+    smooth = np.asarray([np.median(padded[index : index + 3]) for index in range(len(raw))])
+    return [[value[0], round(float(bpm), 6)] for value, bpm in zip(values, smooth)]
 
 
 def _regularize_grid(beats: np.ndarray, tempo: float, duration: float) -> np.ndarray:
@@ -283,6 +316,7 @@ def analyze_track(
     raw_times = librosa.frames_to_time(raw_beat_frames, sr=sr, hop_length=hop)
     tempo, raw_times = _normalize_grid(tempo, np.asarray(raw_times))
     tempo, fine_onset, fine_hop = _refined_tempo(y, sr, tempo)
+    tempo_map = _local_tempo_map(fine_onset, sr, fine_hop, tempo, len(y) / sr)
     beat_times = _regularize_grid(raw_times, tempo, len(y) / sr)
     beat_times = _refine_grid_phase(beat_times, fine_onset, sr, fine_hop, len(y) / sr)
     beat_frames = librosa.time_to_frames(beat_times, sr=sr, hop_length=hop)
@@ -334,6 +368,7 @@ def analyze_track(
         musical_key=musical_key,
         camelot_key=camelot_key,
         key_confidence=key_confidence,
+        tempo_map=tempo_map,
     )
     cached.write_text(json.dumps(asdict(result), indent=2) + "\n")
     return result

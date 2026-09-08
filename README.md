@@ -1,8 +1,8 @@
 # SetMix prototype
 
-SetMix analyzes songs, keeps their supplied order, finds beat-aligned transition
-points, tempo-matches them, applies an equal-power crossfade with a delayed bass
-swap, and renders or plays the resulting set.
+SetMix analyzes songs, keeps their supplied order, estimates BPM and musical
+key/Camelot position, aligns beats and eight-bar phrases, separates four stems,
+and renders or plays staged drum, bass, melodic, and vocal handoffs.
 
 It does not choose songs. A text file or the command-line argument order is the
 playlist order.
