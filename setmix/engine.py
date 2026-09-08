@@ -51,6 +51,7 @@ class Transition:
     to_section: str | None = None
     drop_position: float | None = None
     harmonic_compatibility: float = 0.5
+    events: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -286,6 +287,7 @@ def create_plan(
                     camelot_compatibility(left.camelot_key, right.camelot_key),
                     4,
                 ),
+                events=selected_candidate.events if selected_candidate else None,
             )
         )
         ranked_candidates.append([candidate.to_dict() for candidate in pair_candidates])
@@ -768,6 +770,9 @@ def mix_four_stem_transition(
     outgoing_gain: float,
     incoming_gain: float,
     harmonic_compatibility: float = 1.0,
+    *,
+    bars: int = 16,
+    events: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Layer a long transition with independent musical schedules per stem."""
     names = ("vocals", "drums", "bass", "other")
@@ -776,6 +781,15 @@ def mix_four_stem_transition(
     left = {name: outgoing[name][:frames] * outgoing_gain for name in names}
     right = {name: incoming[name][:frames] * incoming_gain for name in names}
     position = np.linspace(0.0, 1.0, frames, endpoint=False, dtype=np.float32)
+    schedule = {
+        "outgoing_vocal_exit": 0.42,
+        "drum_handoff": 0.46,
+        "bass_handoff": 0.50,
+        "melody_handoff": 0.54,
+        "incoming_vocal_entry": 0.62,
+        **(events or {}),
+    }
+    beat = 1.0 / max(1, bars * 4)
 
     def fade_out(start: float, end: float) -> np.ndarray:
         return np.cos(_smoothstep((position - start) / (end - start)) * (math.pi / 2.0))[:, None]
@@ -785,28 +799,39 @@ def mix_four_stem_transition(
 
     # Drums span almost the whole transition, but equal-power scheduling keeps
     # the combined groove stable. Bass changes only around the middle phrase.
-    drum_a, drum_b = _equal_power(_smoothstep((position - 0.04) / 0.92))
+    drum_center = schedule["drum_handoff"]
+    drum_width = max(8.0 * beat, 0.16)
+    drum_a, drum_b = _equal_power(
+        _smoothstep((position - (drum_center - drum_width / 2.0)) / drum_width)
+    )
     bass_width = 0.24 if harmonic_compatibility >= 0.5 else 0.10
+    bass_width = max(4.0 * beat, bass_width)
+    bass_center = schedule["bass_handoff"]
     bass_a, bass_b = _equal_power(
-        _smoothstep((position - (0.50 - bass_width / 2.0)) / bass_width)
+        _smoothstep((position - (bass_center - bass_width / 2.0)) / bass_width)
     )
 
     # Melodic material crosses later and is filtered to avoid a harmonic pileup.
     other_a = _swept_filter(left["other"], 30.0, 3600.0, "highpass")
     other_b = _swept_filter(right["other"], 650.0, 19000.0, "lowpass")
+    melody = schedule["melody_handoff"]
+    melodic_fade = max(4.0 * beat, 0.08)
     if harmonic_compatibility >= 0.5:
-        other_gain_a = fade_out(0.22, 0.60)
-        other_gain_b = fade_in(0.30, 0.66)
+        other_gain_a = fade_out(melody - melodic_fade, melody + melodic_fade)
+        other_gain_b = fade_in(melody - melodic_fade, melody + melodic_fade)
     else:
         # Incompatible keys can still share a beat, but not a long melodic
         # overlap. Clear the old harmony before revealing the new one.
-        other_gain_a = fade_out(0.16, 0.40)
-        other_gain_b = fade_in(0.60, 0.80)
+        other_gain_a = fade_out(melody - 2.0 * melodic_fade, melody - 0.5 * melodic_fade)
+        other_gain_b = fade_in(melody + 0.5 * melodic_fade, melody + 2.0 * melodic_fade)
 
     # Never present two lead singers together. The instrumental gap is long
     # enough to finish one lyrical thought before the next vocalist appears.
-    vocal_gain_a = fade_out(0.24, 0.42)
-    vocal_gain_b = fade_in(0.48, 0.68)
+    vocal_fade = max(4.0 * beat, 0.06)
+    vocal_exit = schedule["outgoing_vocal_exit"]
+    vocal_entry = schedule["incoming_vocal_entry"]
+    vocal_gain_a = fade_out(vocal_exit - vocal_fade, vocal_exit)
+    vocal_gain_b = fade_in(vocal_entry, vocal_entry + vocal_fade)
 
     mixed = left["drums"] * drum_a + right["drums"] * drum_b
     mixed += left["bass"] * bass_a + right["bass"] * bass_b
@@ -854,6 +879,7 @@ def mix_loop_bridge_transition(
     *,
     bars: int,
     harmonic_compatibility: float = 1.0,
+    events: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Use a repeated instrumental phrase as a simple third-deck bridge."""
     names = ("vocals", "drums", "bass", "other")
@@ -861,6 +887,15 @@ def mix_loop_bridge_transition(
     left = {name: outgoing[name][:frames] * outgoing_gain for name in names}
     right = {name: incoming[name][:frames] * incoming_gain for name in names}
     position = np.linspace(0.0, 1.0, frames, endpoint=False, dtype=np.float32)
+    schedule = {
+        "outgoing_vocal_exit": 0.32,
+        "drum_handoff": 0.43,
+        "bass_handoff": 0.56,
+        "melody_handoff": 0.62,
+        "incoming_vocal_entry": 0.74,
+        **(events or {}),
+    }
+    beat = 1.0 / max(1, bars * 4)
 
     def fade_out(start: float, end: float) -> np.ndarray:
         return np.cos(_smoothstep((position - start) / (end - start)) * (math.pi / 2.0))[:, None]
@@ -870,25 +905,32 @@ def mix_loop_bridge_transition(
 
     beat_frames = max(1, frames // max(1, bars * 4))
     loop = _repeat_to_length(_best_drum_loop(left["drums"], beat_frames), frames)
-    loop_gain = fade_in(0.08, 0.22) * fade_out(0.64, 0.84) * 0.78
+    vocal_exit = schedule["outgoing_vocal_exit"]
+    vocal_entry = schedule["incoming_vocal_entry"]
+    loop_gain = fade_in(max(0.02, vocal_exit - 8.0 * beat), vocal_exit)
+    loop_gain *= fade_out(max(vocal_exit + 4.0 * beat, vocal_entry - 8.0 * beat), vocal_entry) * 0.78
 
     # The live outgoing groove hands control to a predictable repeated beat.
     # The destination drums can then arrive under it without lyrical or melodic
     # clutter, before the loop disappears and the destination vocalist enters.
-    drum_a = fade_out(0.08, 0.28)
-    drum_b = fade_in(0.28, 0.58)
-    bass_a = fade_out(0.18, 0.44)
-    bass_b = fade_in(0.52, 0.72)
+    drum = schedule["drum_handoff"]
+    bass = schedule["bass_handoff"]
+    melody = schedule["melody_handoff"]
+    event_fade = max(4.0 * beat, 0.06)
+    drum_a = fade_out(drum - 2.0 * event_fade, drum)
+    drum_b = fade_in(drum - event_fade, drum + event_fade)
+    bass_a = fade_out(bass - event_fade, bass)
+    bass_b = fade_in(bass, bass + event_fade)
     other_a = _swept_filter(left["other"], 30.0, 4200.0, "highpass")
     other_b = _swept_filter(right["other"], 900.0, 19000.0, "lowpass")
     if harmonic_compatibility >= 0.5:
-        other_gain_a = fade_out(0.12, 0.38)
-        other_gain_b = fade_in(0.50, 0.76)
+        other_gain_a = fade_out(melody - 2.0 * event_fade, melody)
+        other_gain_b = fade_in(melody - event_fade, melody + event_fade)
     else:
-        other_gain_a = fade_out(0.10, 0.30)
-        other_gain_b = fade_in(0.66, 0.84)
-    vocal_a = fade_out(0.12, 0.32)
-    vocal_b = fade_in(0.70, 0.88)
+        other_gain_a = fade_out(melody - 2.0 * event_fade, melody - event_fade)
+        other_gain_b = fade_in(melody + event_fade, melody + 2.0 * event_fade)
+    vocal_a = fade_out(vocal_exit - event_fade, vocal_exit)
+    vocal_b = fade_in(vocal_entry, vocal_entry + event_fade)
 
     mixed = left["drums"] * drum_a + loop * loop_gain + right["drums"] * drum_b
     mixed += left["bass"] * bass_a + right["bass"] * bass_b
@@ -915,6 +957,7 @@ def _mix_four_stem_technique(
             incoming_gain,
             bars=transition.bars,
             harmonic_compatibility=transition.harmonic_compatibility,
+            events=transition.events,
         )
     return mix_four_stem_transition(
         outgoing,
@@ -922,6 +965,8 @@ def _mix_four_stem_technique(
         outgoing_gain,
         incoming_gain,
         harmonic_compatibility=transition.harmonic_compatibility,
+        bars=transition.bars,
+        events=transition.events,
     )
 
 
@@ -930,46 +975,148 @@ def _drum_alignment_transform(
     incoming: np.ndarray,
     bpm: float,
 ) -> tuple[float, float]:
-    """Return reliable phase and drift corrections from isolated drum stems."""
+    """Return a linear summary of the locally repaired drum grid.
+
+    Rendering uses the full piecewise curve below.  This wrapper remains useful
+    for diagnostics and for callers that only understand phase plus tempo drift.
+    """
+    times, lags = _drum_alignment_curve(outgoing, incoming, bpm)
+    if len(lags) < 2:
+        return 0.0, 0.0
+    slope, intercept = np.polyfit(times, lags, 1)
+    return float(np.clip(intercept, -1.0, 1.0)), float(np.clip(slope, -0.008, 0.008))
+
+
+def _drum_alignment_curve(
+    outgoing: np.ndarray,
+    incoming: np.ndarray,
+    bpm: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Repair phase and local drift using four-bar drum-stem landmarks.
+
+    A single BPM and a single phase offset are insufficient when an analysis
+    grid slips inside a song.  We correlate short blocks independently and
+    return a smoothed lag curve, allowing the renderer to correct each part of
+    the transition without changing the rest of either track.
+    """
     hop = 128
     left = librosa.onset.onset_strength(y=np.mean(outgoing, axis=1), sr=SAMPLE_RATE, hop_length=hop)
     right = librosa.onset.onset_strength(y=np.mean(incoming, axis=1), sr=SAMPLE_RATE, hop_length=hop)
-    frames_per_block = round(8.0 * 4.0 * 60.0 / bpm * SAMPLE_RATE / hop)
-    radius = round(0.25 * SAMPLE_RATE / hop)
+    usable = min(len(left), len(right))
+    # Four-bar blocks give four independent measurements in the common
+    # sixteen-bar transition; the old eight-bar/four-block requirement silently
+    # disabled repair for that case.
+    frames_per_block = max(32, round(4.0 * 4.0 * 60.0 / bpm * SAMPLE_RATE / hop))
+    beat_seconds = 60.0 / bpm
+    radius_seconds = max(0.25, min(0.75, 1.25 * beat_seconds))
+    radius = round(radius_seconds * SAMPLE_RATE / hop)
+    # Establish a global phase first.  This can identify a one-beat downbeat
+    # error when kicks are accented, while the small penalty keeps an
+    # indistinguishable four-on-the-floor pattern close to zero.
+    global_left = (left[:usable] - np.mean(left[:usable])) / (np.std(left[:usable]) + 1e-9)
+    global_right = (right[:usable] - np.mean(right[:usable])) / (np.std(right[:usable]) + 1e-9)
+    global_scores: list[float] = []
+    broad_candidates = list(range(-radius, radius + 1))
+    beat_frames = max(4, round(beat_seconds * SAMPLE_RATE / hop))
+    accent_starts = list(range(0, usable - beat_frames, beat_frames))
+    left_accents = np.asarray(
+        [float(np.max(left[start : start + beat_frames])) for start in accent_starts]
+    )
+    right_accents_zero = np.asarray(
+        [float(np.max(right[start : start + beat_frames])) for start in accent_starts]
+    )
+
+    def metrical_contrast(values: np.ndarray) -> float:
+        phase_means = np.asarray([np.mean(values[offset::4]) for offset in range(4)])
+        return float((np.max(phase_means) - np.min(phase_means)) / (np.mean(phase_means) + 1e-9))
+
+    has_downbeat_accents = (
+        len(left_accents) >= 12
+        and metrical_contrast(left_accents) >= 0.25
+        and metrical_contrast(right_accents_zero) >= 0.25
+    )
+    for lag in broad_candidates:
+        if lag < 0:
+            a, b = global_left[-lag:], global_right[:usable + lag]
+        elif lag > 0:
+            a, b = global_left[:usable - lag], global_right[lag:]
+        else:
+            a, b = global_left, global_right
+        score = float(np.dot(a, b) / max(1, len(a))) - 0.05 * abs(lag) / max(1, radius)
+        valid = [index for index, start in enumerate(accent_starts) if 0 <= start + lag and start + lag + beat_frames <= usable]
+        if has_downbeat_accents and len(valid) >= 12:
+            right_accents = np.asarray(
+                [float(np.max(right[accent_starts[index] + lag : accent_starts[index] + lag + beat_frames])) for index in valid]
+            )
+            selected_left = left_accents[valid]
+            if float(np.std(selected_left)) > 1e-5 and float(np.std(right_accents)) > 1e-5:
+                # Beat-bin accents disambiguate a one-beat downbeat error that
+                # ordinary sample correlation sees as a perfect kick match.
+                score += 0.18 * float(np.corrcoef(selected_left, right_accents)[0, 1])
+        global_scores.append(score)
+    coarse_lag = broad_candidates[int(np.argmax(global_scores))]
+    local_radius = max(2, round(0.22 * SAMPLE_RATE / hop))
     lags: list[float] = []
     times: list[float] = []
-    for block in range(4):
+    block_count = min(8, math.ceil(usable / frames_per_block))
+    for block in range(block_count):
         start = block * frames_per_block
-        end = min(len(left), len(right), (block + 1) * frames_per_block)
-        if end - start < frames_per_block // 2:
+        end = min(usable, (block + 1) * frames_per_block)
+        if end - start < max(32, frames_per_block // 2):
             break
         first = left[start:end]
         second = right[start:end]
+        if float(np.std(first)) < 1e-5 or float(np.std(second)) < 1e-5:
+            continue
         first = (first - np.mean(first)) / (np.std(first) + 1e-9)
         second = (second - np.mean(second)) / (np.std(second) + 1e-9)
         scores: list[float] = []
-        candidates = range(-radius, radius + 1)
+        candidates = list(
+            range(max(-radius, coarse_lag - local_radius), min(radius, coarse_lag + local_radius) + 1)
+        )
         for lag in candidates:
             if lag < 0:
-                score = np.dot(first[-lag:], second[: len(second) + lag])
+                a, b = first[-lag:], second[: len(second) + lag]
             elif lag > 0:
-                score = np.dot(first[: len(first) - lag], second[lag:])
+                a, b = first[: len(first) - lag], second[lag:]
             else:
-                score = np.dot(first, second)
-            scores.append(float(score))
-        lag = list(candidates)[int(np.argmax(scores))] * hop / SAMPLE_RATE
+                a, b = first, second
+            correlation = float(np.dot(a, b) / max(1, len(a)))
+            # A light prior avoids choosing an entire beat of displacement when
+            # two unaccented four-on-the-floor patterns are indistinguishable.
+            correlation -= 0.01 * abs(lag - coarse_lag) / max(1, local_radius)
+            scores.append(correlation)
+        best = int(np.argmax(scores))
+        lag = candidates[best] * hop / SAMPLE_RATE
+        excluded = max(1, round(0.035 * SAMPLE_RATE / hop))
+        alternatives = scores[: max(0, best - excluded)] + scores[min(len(scores), best + excluded + 1) :]
+        margin = scores[best] - (max(alternatives) if alternatives else 0.0)
+        if scores[best] < 0.08 or margin < 0.0004:
+            continue
         lags.append(lag)
         times.append((block + 0.5) * frames_per_block * hop / SAMPLE_RATE)
-    if len(lags) < 4:
-        return 0.0, 0.0
-    slope, intercept = np.polyfit(times, lags, 1)
-    predicted = np.polyval((slope, intercept), times)
-    variance = float(np.sum(np.square(np.asarray(lags) - np.mean(lags))))
-    residual = float(np.sum(np.square(np.asarray(lags) - predicted)))
-    r_squared = 1.0 - residual / max(variance, 1e-9)
-    if r_squared < 0.90 or (abs(intercept) < 0.025 and abs(slope) < 0.0008):
-        return 0.0, 0.0
-    return float(np.clip(intercept, -0.20, 0.20)), float(np.clip(slope, -0.005, 0.005))
+    if len(lags) < 2:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+
+    values = np.asarray(lags, dtype=np.float64)
+    # Remove isolated octave/beat-period errors, then smooth remaining local
+    # measurements without erasing gradual drift.
+    if len(values) >= 3:
+        padded = np.pad(values, (1, 1), mode="edge")
+        median = np.asarray([np.median(padded[index : index + 3]) for index in range(len(values))])
+        outlier = np.abs(values - median) > max(0.08, beat_seconds * 0.35)
+        values[outlier] = median[outlier]
+        padded = np.pad(values, (1, 1), mode="edge")
+        values = np.asarray(
+            [0.25 * padded[index] + 0.5 * padded[index + 1] + 0.25 * padded[index + 2] for index in range(len(values))]
+        )
+    if float(np.max(np.abs(values))) < 0.018 and float(np.ptp(values)) < 0.012:
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+    # Reject wildly discontinuous repairs; a genuine local tempo drift changes
+    # slowly compared with the four-bar observation window.
+    if len(values) > 1 and float(np.max(np.abs(np.diff(values)))) > max(0.20, beat_seconds * 0.60):
+        return np.asarray([], dtype=np.float64), np.asarray([], dtype=np.float64)
+    return np.asarray(times, dtype=np.float64), np.clip(values, -1.0, 1.0)
 
 
 def _read_aligned_stems(
@@ -982,8 +1129,16 @@ def _read_aligned_stems(
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], int]:
     left = {name: _read_segment(handle, cue_from, frames) for name, handle in outgoing.items()}
     right_probe = _read_segment(incoming["drums"], cue_to, frames)
-    intercept, slope = _drum_alignment_transform(left["drums"], right_probe, bpm)
-    positions = cue_to + intercept * SAMPLE_RATE + np.arange(frames, dtype=np.float64) * (1.0 + slope)
+    repair_times, repair_lags = _drum_alignment_curve(left["drums"], right_probe, bpm)
+    output_times = np.arange(frames, dtype=np.float64) / SAMPLE_RATE
+    if len(repair_lags):
+        lag_curve = np.interp(output_times, repair_times, repair_lags)
+        # Limit the local warp to ±0.8% while preserving its measured phase.
+        increments = np.clip(np.diff(lag_curve), -0.008 / SAMPLE_RATE, 0.008 / SAMPLE_RATE)
+        lag_curve = lag_curve[0] + np.concatenate(([0.0], np.cumsum(increments)))
+    else:
+        lag_curve = np.zeros(frames, dtype=np.float64)
+    positions = cue_to + (output_times + lag_curve) * SAMPLE_RATE
     source_start = max(0, math.floor(float(positions[0])) - 2)
     relative = positions - source_start
     source_frames = math.ceil(float(positions[-1])) - source_start + 3
@@ -992,7 +1147,7 @@ def _read_aligned_stems(
         source = _read_segment(handle, source_start, source_frames)
         channels = [np.interp(relative, np.arange(len(source)), source[:, channel]) for channel in range(CHANNELS)]
         right[name] = np.column_stack(channels).astype(np.float32)
-    consumed_end = round(float(positions[-1]) + 1.0 + slope)
+    consumed_end = round(float(positions[-1]) + 1.0)
     return left, right, consumed_end
 
 

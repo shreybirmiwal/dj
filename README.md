@@ -106,6 +106,23 @@ Run the intelligence layer without planning or rendering:
 scripts/setmix intelligence first.flac second.flac --word-model base
 ```
 
+Precompute a folder before a set so live planning only reads cached knowledge:
+
+```sh
+# Beats/downbeats, phrases, local tempo, key, and energy
+scripts/setmix prepare ~/Desktop/dj-music --level basic
+
+# Also vocal activity, sections, and word-level lyric events (default)
+scripts/setmix prepare ~/Desktop/dj-music --level smart
+
+# Also four Demucs stems for the fastest later render; uses much more disk
+scripts/setmix prepare ~/Desktop/dj-music --level full
+```
+
+Preparation is content-addressed and resumable. Its index is
+`.setmix-cache/library-index.json`; changing one song invalidates only that
+song. It is playlist-independent, so the user can still choose the order live.
+
 The plan JSON is also the UI contract. `track_intelligence` contains sections,
 word timestamps, lyric phrases, language, and confidence; `ranked_candidates`
 contains alternate cue pairs with component scores and human-readable reasons;
@@ -213,9 +230,16 @@ scripts/setmix --bars 32 audition first.flac second.flac \
 ```
 
 `stem_phrase` aligns eight-bar phrases, establishes the incoming drums early,
-finishes the outgoing lyric, swaps bass at the phrase midpoint, trades the
-melodic layers under filtering, reveals the incoming singer later, and removes
-the outgoing drums last. Stem extraction is cached.
+finishes the outgoing lyric, swaps bass on a detected drop/section boundary,
+trades melodic layers under filtering, and reveals the incoming singer on a
+real word/quiet-pocket boundary. Candidates carry explicit vocal, drum, bass,
+melody, and incoming-vocal event times instead of one fixed fade percentage.
+Stem extraction is cached.
+
+Immediately before a stem transition, SetMix correlates isolated drum onsets in
+four-bar blocks. It detects full-beat downbeat mistakes from metrical accents
+and builds a smooth local lag curve for phase or tempo drift, so a correct
+global BPM cannot conceal an audibly bad local grid.
 
 Use any ordered list of files:
 
@@ -246,3 +270,6 @@ stem layer runs Hybrid Transformer Demucs locally and produces a 250 ms vocal
 activity timeline. The intelligence layer uses faster-whisper locally for lyric
 timing and labels phrase-level sections from energy, brightness, percussion, and
 vocal density. Analyses, stems, sections, and transcripts are cached locally.
+Large audio-language models such as NVIDIA Audio Flamingo fit best as an
+optional offline semantic critic/candidate reranker, not inside the sample-level
+mixing loop; explicit event and repaired-grid data remain the render contract.

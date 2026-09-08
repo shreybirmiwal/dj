@@ -17,6 +17,7 @@ from .engine import (
     validate_render,
 )
 from .intelligence import analyze_intelligence
+from .preprocess import PREPARATION_LEVELS, prepare_library
 from .stems import analyze_vocals
 
 
@@ -52,6 +53,15 @@ def _parser() -> argparse.ArgumentParser:
     analyze = sub.add_parser("analyze", help="print cached track analysis")
     analyze.add_argument("tracks", nargs="+")
     analyze.add_argument("--force", action="store_true")
+
+    prepare = sub.add_parser(
+        "prepare",
+        help="precompute reusable track knowledge for fast future mixes",
+    )
+    prepare.add_argument("tracks", nargs="+")
+    prepare.add_argument("--level", choices=PREPARATION_LEVELS, default="smart")
+    prepare.add_argument("--word-model", default="base")
+    prepare.add_argument("--force", action="store_true")
 
     plan = sub.add_parser("plan", help="compile an ordered playlist to JSON")
     plan.add_argument("tracks", nargs="+")
@@ -134,6 +144,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report["passed"] else 1
 
         tracks = discover_tracks(args.tracks)
+        if args.command == "prepare":
+            report = prepare_library(
+                tracks,
+                level=args.level,
+                transition_bars=args.bars,
+                workers=args.workers,
+                word_model=args.word_model,
+                force=args.force,
+                progress=_progress,
+            )
+            print(json.dumps(report, indent=2))
+            return 0 if not report["failures"] else 2
         if args.command == "stems":
             values = [analyze_vocals(path, force=args.force) for path in tracks]
             print(json.dumps([value.__dict__ for value in values], indent=2))

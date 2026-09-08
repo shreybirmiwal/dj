@@ -202,17 +202,17 @@ them only with a listening reason and update this table.
 | Vocal activity resolution | 250 ms | Cheap cached planning signal | Word timestamps must override it near lyric cuts |
 | Incoming search | First 4 complete phrases | Prevents skipping deep into the next song | May miss a uniquely clean later intro edit |
 | Outgoing search | Last 8 complete candidates | Preserves more of the outgoing track | Long transitions can still begin too early |
-| Stem outgoing vocal fade | 24%-42% | Finishes outgoing singer before midpoint | Fixed percentages ignore actual word endings |
-| Stem incoming vocal reveal | 48%-68% | Creates a vocal-free pocket | Trust feedback requires event-driven entrance |
-| Stem bass swap | 38%-62% | Keeps two bass lines apart | Must react to drops and breakdowns |
-| Stem drum blend | 4%-96% | Provides long rhythmic continuity | Unsafe when either beat grid is uncertain |
+| Stem outgoing vocal fade | Detected phrase/word end, normally 14%-52% | Finishes the actual lyrical thought | Falls back to 36% without vocal evidence |
+| Stem incoming vocal reveal | Detected phrase/word start after a quiet pocket, normally 54%-90% | Makes the singer enter on a real event | Falls back to 68% without vocal evidence |
+| Stem bass swap | Detected drop or section-energy boundary, constrained to 38%-70% | Separates bass lines and serves the arrangement | Weak section labels can still choose an ordinary boundary |
+| Stem drum blend | Event-scheduled around the bass/section handoff | Provides continuity without tying every layer to one fade | Unsafe when both isolated drum stems are sparse |
 | Drop eligibility | 32%-80% of transition | Requires an audible setup before impact | Does not yet require a lyric-safe actual cut time |
 | Ideal drop location | 52%, width 22% | Favors a balanced build/drop arc | Some genres need earlier or later payoff |
 | Drop low-end exit | Final beat before drop | Creates tension and clears bass | Can feel abrupt without stem/vocal independence |
 | Drop low-end entrance | First quarter-beat after drop | Preserves impact | Needs local loudness compensation |
 | Drop mid overlap | 2 beats | Avoids full-spectrum hard cut | Can still truncate a vocal phrase |
 | Drop high overlap | 4 beats | Retains ambience and continuity | Dense vocals can still clash |
-| Drum drift correction | 4 eight-bar blocks, R² >= 0.90 | Applies warp only to reliable measured drift | Syncopated patterns can confuse correlation |
+| Drum grid repair | Piecewise four-bar correlation; ±0.8% local warp; accented ±1-beat phase search | Corrects phase, downbeat mistakes, and drift in a normal 16-bar transition | Sparse or unaccented syncopation can remain ambiguous and safely disables repair |
 | Track loudness target | Approximately -15 dB RMS analysis target | Reduces obvious song-to-song level changes | Local section energy still varies |
 | Long-transition solo space | 8 bars when the track permits | Prevents back-to-back transitions and cue rewinds | Very short tracks may have to mix again immediately |
 | Long-stem energy floor | 66% of interpolated 75th-percentile section RMS, max 3.5x lift | Supports unexpectedly sparse handoff centers without flattening the whole song | Still needs human listening for audible pumping or stem noise |
@@ -238,10 +238,10 @@ would justify an impact cut must not pull a gradual blend into two breakdowns.
 | Tempo compatibility | 0.04 | Penalize difficult stretches |
 | Drop opportunity | 0.15 | Reward a usable, sufficiently prepared incoming drop |
 
-Known scoring defect: word-boundary timestamps are evaluated using fixed stem
-handoff percentages. They must become **technique-specific event times**. For
-example, score the actual drop dominance event for `drop_cut`, and score the
-detected vocal-pocket entrance for the future instrumental-bed technique.
+Word-boundary scoring now evaluates the candidate's actual event schedule rather
+than fixed stem percentages. Remaining limitation: `drop_cut` needs the same
+independent stem event choreography before it can safely preserve an outgoing
+lyric while changing bass/drum weight on the destination drop.
 
 ### Ten-song randomized pop/EDM set
 - Render: `output/ten-song-random-2026-09-08/full-mix-v5.mp3`

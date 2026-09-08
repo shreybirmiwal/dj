@@ -4,6 +4,7 @@ import numpy as np
 
 from setmix.analysis import TrackAnalysis
 from setmix.engine import (
+    _drum_alignment_curve,
     _drum_alignment_transform,
     mix_four_stem_transition,
     mix_loop_bridge_transition,
@@ -11,6 +12,7 @@ from setmix.engine import (
     mix_transition,
 )
 from setmix.intelligence import (
+    _event_schedule,
     LyricPhrase,
     SectionSpan,
     TrackIntelligence,
@@ -203,6 +205,41 @@ def test_drum_alignment_tracks_gradual_tempo_drift() -> None:
     assert abs(slope - 0.002) < 0.001
 
 
+def test_grid_repair_works_on_a_normal_sixteen_bar_transition() -> None:
+    sample_rate = 44100
+    seconds = 32
+    frames = sample_rate * seconds
+    outgoing = np.zeros((frames, 2), dtype="float32")
+    incoming = np.zeros((frames, 2), dtype="float32")
+    click = np.asarray([1.0, 0.65, 0.35, 0.15], dtype="float32")
+    for beat in np.arange(0.5, seconds - 0.5, 0.5):
+        left = round(beat * sample_rate)
+        right = round((0.055 + beat * 1.0015) * sample_rate)
+        outgoing[left : left + len(click)] = click[:, None]
+        incoming[right : right + len(click)] = click[:, None]
+    times, lags = _drum_alignment_curve(outgoing, incoming, 120.0)
+    assert len(times) == len(lags) == 4
+    assert 0.05 < lags[0] < lags[-1] < 0.12
+
+
+def test_grid_repair_detects_a_full_beat_downbeat_error() -> None:
+    sample_rate = 44100
+    seconds = 32
+    frames = sample_rate * seconds
+    outgoing = np.zeros((frames, 2), dtype="float32")
+    incoming = np.zeros((frames, 2), dtype="float32")
+    click = np.asarray([1.0, 0.6, 0.25, 0.1], dtype="float32")
+    for index, beat in enumerate(np.arange(0.5, seconds - 0.5, 0.5)):
+        accent = 1.0 if index % 4 == 0 else 0.1
+        left = round(beat * sample_rate)
+        right = round((beat + 0.5) * sample_rate)
+        outgoing[left : left + len(click)] = click[:, None] * accent
+        incoming[right : right + len(click)] = click[:, None] * accent
+    intercept, slope = _drum_alignment_transform(outgoing, incoming, 120.0)
+    assert abs(intercept - 0.5) < 0.025
+    assert abs(slope) < 0.0005
+
+
 def _intelligent_track(path: str) -> TrackAnalysis:
     return TrackAnalysis(
         path=path,
@@ -221,6 +258,42 @@ def _intelligent_track(path: str) -> TrackAnalysis:
         camelot_key="8B",
         key_confidence=0.9,
     )
+
+
+def test_event_schedule_uses_detected_lyric_boundaries() -> None:
+    left = _intelligent_track("left.wav")
+    right = _intelligent_track("right.wav")
+    section = SectionSpan(0.0, 64.0, "verse", 0.6, 0.5, 0.5, 0.5, 0.9)
+    left_words = VocalTranscript(
+        left.path,
+        "test",
+        "en",
+        [WordTimestamp("done.", 5.0, 5.2, 0.99)],
+        [LyricPhrase(3.0, 5.2, "done.")],
+        0.99,
+    )
+    right_words = VocalTranscript(
+        right.path,
+        "test",
+        "en",
+        [WordTimestamp("hello", 12.8, 13.1, 0.99)],
+        [LyricPhrase(12.8, 15.0, "hello")],
+        0.99,
+    )
+    events = _event_schedule(
+        TrackIntelligence(left.path, [section], left_words),
+        TrackIntelligence(right.path, [section], right_words),
+        VocalMap(left.path, "test", 0.25, [[0.0, 5.2]], 0.3, 1.0),
+        VocalMap(right.path, "test", 0.25, [[12.8, 16.0]], 0.2, 1.0),
+        0.0,
+        0.0,
+        16.0,
+        16.0,
+        None,
+    )
+    assert abs(events["outgoing_vocal_exit"] - 0.325) < 0.01
+    assert abs(events["incoming_vocal_entry"] - 0.8) < 0.01
+    assert events["outgoing_vocal_exit"] < events["bass_handoff"] < events["incoming_vocal_entry"]
 
 
 def test_candidates_are_ranked_and_explain_their_scores() -> None:

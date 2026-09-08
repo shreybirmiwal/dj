@@ -82,6 +82,7 @@ class TransitionCandidate:
     outgoing_word_boundary: float
     incoming_word_boundary: float
     drop_position: float | None = None
+    events: dict[str, float] | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -226,6 +227,7 @@ def transcribe_vocals(
     *,
     model_name: str = "base",
     cache_dir: str | Path = ".setmix-cache/intelligence",
+    stem_cache_dir: str | Path = ".setmix-cache/stems",
     force: bool = False,
 ) -> VocalTranscript:
     """Transcribe a separated vocal stem with word-level timestamps."""
@@ -244,7 +246,7 @@ def transcribe_vocals(
             "Word-level vocal timing requires requirements-intelligence.txt"
         ) from error
 
-    vocals, _ = separate_vocals(source)
+    vocals, _ = separate_vocals(source, cache_dir=stem_cache_dir)
     model = WhisperModel(model_name, device="cpu", compute_type="int8")
     raw_segments, info = model.transcribe(
         str(vocals),
@@ -291,11 +293,23 @@ def analyze_intelligence(
     word_model: str = "base",
     transcribe: bool = True,
     force: bool = False,
+    cache_dir: str | Path = ".setmix-cache/intelligence",
+    stem_cache_dir: str | Path = ".setmix-cache/stems",
 ) -> TrackIntelligence:
-    transcript = transcribe_vocals(track.path, model_name=word_model, force=force) if transcribe else None
+    transcript = (
+        transcribe_vocals(
+            track.path,
+            model_name=word_model,
+            cache_dir=cache_dir,
+            stem_cache_dir=stem_cache_dir,
+            force=force,
+        )
+        if transcribe
+        else None
+    )
     return TrackIntelligence(
         path=track.path,
-        sections=analyze_sections(track, vocals, force=force),
+        sections=analyze_sections(track, vocals, cache_dir=cache_dir, force=force),
         transcript=transcript,
     )
 
@@ -369,6 +383,88 @@ def _word_boundary_score(
     if punctuation:
         score = min(1.0, score + 0.18)
     return float(score), float(distance)
+
+
+def _event_schedule(
+    left: TrackIntelligence,
+    right: TrackIntelligence,
+    left_vocals: VocalMap,
+    right_vocals: VocalMap,
+    left_start: float,
+    right_start: float,
+    left_duration: float,
+    right_duration: float,
+    drop_position: float | None,
+) -> dict[str, float]:
+    """Place mix events on detected words, quiet pockets, and section changes."""
+
+    def normalized(second: float, start: float, duration: float) -> float:
+        return float(np.clip((second - start) / max(duration, 1e-9), 0.0, 1.0))
+
+    exit_candidates: list[tuple[float, float]] = []
+    if left.transcript:
+        for phrase in left.transcript.phrases:
+            position = normalized(phrase.end, left_start, left_duration)
+            if 0.14 <= position <= 0.52:
+                quiet = 1.0 - left_vocals.activity_fraction(
+                    phrase.end,
+                    min(left_start + left_duration, phrase.end + 2.5),
+                )
+                exit_candidates.append((0.65 * quiet + 0.35 * math.exp(-abs(position - 0.34) / 0.18), position))
+    for _start, end in left_vocals.segments:
+        position = normalized(end, left_start, left_duration)
+        if 0.14 <= position <= 0.52:
+            quiet = 1.0 - left_vocals.activity_fraction(end, min(left_start + left_duration, end + 2.5))
+            exit_candidates.append((0.75 * quiet + 0.25 * math.exp(-abs(position - 0.34) / 0.18), position))
+    vocal_exit = max(exit_candidates)[1] if exit_candidates else 0.36
+
+    entry_candidates: list[tuple[float, float]] = []
+    if right.transcript:
+        for phrase in right.transcript.phrases:
+            position = normalized(phrase.start, right_start, right_duration)
+            if 0.50 <= position <= 0.90:
+                quiet = 1.0 - right_vocals.activity_fraction(
+                    max(right_start, phrase.start - 2.5),
+                    phrase.start,
+                )
+                entry_candidates.append((0.65 * quiet + 0.35 * math.exp(-abs(position - 0.70) / 0.18), position))
+    for start, _end in right_vocals.segments:
+        position = normalized(start, right_start, right_duration)
+        if 0.50 <= position <= 0.90:
+            quiet = 1.0 - right_vocals.activity_fraction(max(right_start, start - 2.5), start)
+            entry_candidates.append((0.75 * quiet + 0.25 * math.exp(-abs(position - 0.70) / 0.18), position))
+    vocal_entry = max(entry_candidates)[1] if entry_candidates else 0.68
+
+    boundary_candidates: list[tuple[float, float]] = []
+    previous = right.section_at(right_start)
+    for section in right.sections:
+        position = normalized(section.start, right_start, right_duration)
+        if not 0.30 <= position <= 0.72:
+            continue
+        rise = section.energy - (previous.energy if previous else section.energy)
+        importance = 0.55 * max(0.0, rise) + 0.30 * section.percussion + 0.15 * section.confidence
+        boundary_candidates.append((importance, position))
+        previous = section
+    bass_handoff = (
+        drop_position
+        if drop_position is not None
+        else (max(boundary_candidates)[1] if boundary_candidates else 0.50)
+    )
+    bass_handoff = float(np.clip(bass_handoff, 0.38, 0.70))
+
+    vocal_exit = float(np.clip(vocal_exit, 0.14, min(0.52, bass_handoff - 0.02)))
+    vocal_entry = float(
+        np.clip(vocal_entry, max(0.54, bass_handoff + 0.08, vocal_exit + 0.18), 0.90)
+    )
+    melody_handoff = float(np.clip(bass_handoff + 0.04, vocal_exit + 0.06, vocal_entry - 0.06))
+    drum_handoff = float(np.clip(bass_handoff - 0.10, 0.25, 0.60))
+    return {
+        "outgoing_vocal_exit": round(vocal_exit, 6),
+        "drum_handoff": round(drum_handoff, 6),
+        "bass_handoff": round(bass_handoff, 6),
+        "melody_handoff": round(melody_handoff, 6),
+        "incoming_vocal_entry": round(vocal_entry, 6),
+    }
 
 
 def camelot_compatibility(left: str, right: str) -> float:
@@ -567,14 +663,25 @@ def rank_transition_candidates(
                 left_source_duration,
                 right_source_duration,
             )
+            events = _event_schedule(
+                left_intelligence,
+                right_intelligence,
+                left_vocals,
+                right_vocals,
+                left_start,
+                right_start,
+                left_source_duration,
+                right_source_duration,
+                drop_position,
+            )
             left_word, left_gap = _word_boundary_score(
                 left_intelligence.transcript,
-                left_start + 0.42 * left_source_duration,
+                left_start + events["outgoing_vocal_exit"] * left_source_duration,
                 outgoing=True,
             )
             right_word, right_gap = _word_boundary_score(
                 right_intelligence.transcript,
-                right_start + 0.48 * right_source_duration,
+                right_start + events["incoming_vocal_entry"] * right_source_duration,
                 outgoing=False,
             )
             section_score = _section_score(left_section, right_section)
@@ -665,6 +772,7 @@ def rank_transition_candidates(
                     outgoing_word_boundary=round(left_word, 4),
                     incoming_word_boundary=round(right_word, 4),
                     drop_position=round(drop_position, 6) if drop_position is not None else None,
+                    events=events,
                 )
             )
     return sorted(candidates, key=lambda item: item.score, reverse=True)[:limit]
