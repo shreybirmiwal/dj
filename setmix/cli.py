@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from .analysis import analyze_track, discover_tracks
+from .engine import (
+    analyze_ordered,
+    create_plan,
+    render_mix,
+    render_transition_auditions,
+    stream_mix,
+    stream_ordered_live,
+    validate_render,
+)
+from .stems import analyze_vocals
+
+
+TECHNIQUES = (
+    "auto",
+    "varied",
+    "stem_phrase",
+    "bass_swap",
+    "filter_sweep",
+    "highpass_out",
+    "lowpass_reveal",
+    "echo_out",
+    "loop_filter",
+    "reverb_tail",
+)
+
+
+def _progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="setmix",
+        description="Analyze and beat-mix songs in the exact order provided.",
+    )
+    parser.add_argument("--bars", type=int, default=16, help="transition length in bars")
+    parser.add_argument("--workers", type=int, default=3, help="parallel analysis workers")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    analyze = sub.add_parser("analyze", help="print cached track analysis")
+    analyze.add_argument("tracks", nargs="+")
+    analyze.add_argument("--force", action="store_true")
+
+    plan = sub.add_parser("plan", help="compile an ordered playlist to JSON")
+    plan.add_argument("tracks", nargs="+")
+    plan.add_argument("-o", "--output", required=True)
+    plan.add_argument("--vocals", action="store_true", help="use neural vocal maps when planning")
+    plan.add_argument("--technique", choices=TECHNIQUES, default="auto")
+
+    render = sub.add_parser("render", help="render an ordered playlist to WAV or FLAC")
+    render.add_argument("tracks", nargs="+")
+    render.add_argument("-o", "--output", required=True)
+    render.add_argument("--previews", help="directory for transition MP3 previews")
+    render.add_argument("--vocals", action="store_true", help="use neural vocal maps when planning")
+    render.add_argument("--technique", choices=TECHNIQUES, default="auto")
+
+    stream = sub.add_parser("stream", help="play the generated mix through ffplay")
+    stream.add_argument("tracks", nargs="+")
+    stream.add_argument("--seconds", type=float, help="stop after this many seconds")
+    stream.add_argument("--transition", type=int, help="start eight seconds before transition N")
+    stream.add_argument("--vocals", action="store_true", help="use neural vocal maps when planning")
+    stream.add_argument("--technique", choices=TECHNIQUES, default="auto")
+
+    live = sub.add_parser("live", help="play now and prepare future tracks asynchronously")
+    live.add_argument("tracks", nargs="+")
+    live.add_argument("--seconds", type=float, help="stop after this many seconds")
+    live.add_argument(
+        "--technique",
+        choices=tuple(value for value in TECHNIQUES if value not in {"auto", "stem_phrase"}),
+        default="bass_swap",
+    )
+    live.add_argument(
+        "--near-transition",
+        action="store_true",
+        help="test by starting eight seconds before the first transition",
+    )
+
+    stems = sub.add_parser("stems", help="separate vocals and print vocal-activity timelines")
+    stems.add_argument("tracks", nargs="+")
+    stems.add_argument("--force", action="store_true")
+
+    audition = sub.add_parser("audition", help="render every effect as a short transition preview")
+    audition.add_argument("tracks", nargs="+")
+    audition.add_argument("-o", "--output", required=True)
+    audition.add_argument("--vocals", action="store_true", help="use neural vocal maps when planning")
+    audition.add_argument("--technique", choices=TECHNIQUES, default="auto")
+    audition.add_argument(
+        "--selected-only",
+        action="store_true",
+        help="render only the technique selected for each transition",
+    )
+
+    validate = sub.add_parser("validate", help="measure a rendered mix and its transitions")
+    validate.add_argument("audio")
+    validate.add_argument("--plan")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        if args.command == "validate":
+            report = validate_render(args.audio, args.plan)
+            print(json.dumps(report, indent=2))
+            return 0 if report["passed"] else 1
+
+        tracks = discover_tracks(args.tracks)
+        if args.command == "stems":
+            values = [analyze_vocals(path, force=args.force) for path in tracks]
+            print(json.dumps([value.__dict__ for value in values], indent=2))
+            return 0
+        if args.command == "live":
+            stream_ordered_live(
+                tracks,
+                transition_bars=args.bars,
+                workers=args.workers,
+                max_seconds=args.seconds,
+                start_near_first_transition=args.near_transition,
+                technique=args.technique,
+                progress=_progress,
+            )
+            return 0
+
+        if args.command == "analyze":
+            values = [
+                analyze_track(path, transition_bars=args.bars, force=args.force)
+                for path in tracks
+            ]
+            print(json.dumps([value.__dict__ for value in values], indent=2))
+            return 0
+
+        analyses = analyze_ordered(
+            tracks,
+            transition_bars=args.bars,
+            workers=args.workers,
+            progress=_progress,
+        )
+        vocal_maps = None
+        needs_vocals = getattr(args, "vocals", False) or getattr(args, "technique", "") == "stem_phrase"
+        if needs_vocals:
+            _progress("Generating neural vocal-activity maps")
+            vocal_maps = {str(path): analyze_vocals(path) for path in tracks}
+        mix_plan = create_plan(
+            analyses,
+            vocal_maps=vocal_maps,
+            technique=getattr(args, "technique", "auto"),
+        )
+        if args.command == "audition":
+            outputs = render_transition_auditions(
+                mix_plan,
+                args.output,
+                selected_only=args.selected_only,
+            )
+            for output in outputs:
+                _progress(f"Wrote {output}")
+        elif args.command == "plan":
+            destination = Path(args.output).expanduser().resolve()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(mix_plan.to_dict(), indent=2) + "\n")
+            _progress(f"Wrote {destination}")
+        elif args.command == "render":
+            render_mix(
+                mix_plan,
+                args.output,
+                preview_dir=args.previews,
+                progress=_progress,
+            )
+        elif args.command == "stream":
+            start = 0.0
+            if args.transition is not None:
+                if args.transition < 1 or args.transition > len(mix_plan.transitions):
+                    raise ValueError(f"Transition must be between 1 and {len(mix_plan.transitions)}")
+                start = max(0.0, mix_plan.transitions[args.transition - 1].set_time - 8.0)
+            stream_mix(mix_plan, start_seconds=start, max_seconds=args.seconds)
+        return 0
+    except (ValueError, RuntimeError, OSError) as error:
+        print(f"setmix: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
