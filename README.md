@@ -4,6 +4,13 @@
 > launch/playlist bridge and the proposed AI-sidecar architecture are documented
 > in [`docs/MIXXX_INTEGRATION.md`](docs/MIXXX_INTEGRATION.md).
 
+The editable Mixxx fork can also be built in the ignored `mixxx-fork/` checkout
+and launched with an isolated local profile:
+
+```sh
+scripts/run-mixxx-fork
+```
+
 Before changing planner or transition behavior, read
 [`docs/HUMAN_FEEDBACK.md`](docs/HUMAN_FEEDBACK.md). It records listener
 preferences, failed and approved references, open acceptance criteria, and the

@@ -14,6 +14,31 @@ consume the project without improving the AI.
 The upstream source fork is <https://github.com/shreybirmiwal/mixxx>. It is kept
 separate because Mixxx is a large C++/Qt GPL project and SetMix is a Python
 sidecar. This repository's `mixxx-integration` branch contains the SetMix half.
+A local, editable checkout may live at `mixxx-fork/`; the parent repository
+ignores that directory so the two Git histories remain independent.
+
+## Local fork
+
+The local checkout uses `origin` for `shreybirmiwal/mixxx`, `upstream` for
+`mixxxdj/mixxx`, and the `setmix-integration` working branch. On Apple Silicon,
+configure and build it with Mixxx's official release dependency environment:
+
+```sh
+cd mixxx-fork
+export BUILDENV_RELEASE=TRUE
+source tools/macos_buildenv.sh setup
+cmake -S . -B build \
+  -DCMAKE_TOOLCHAIN_FILE="$MIXXX_VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel "$(sysctl -n hw.ncpu)"
+```
+
+From the SetMix root, launch the resulting build with a dedicated settings
+profile and the fork's `res/` source resources:
+
+```sh
+scripts/run-mixxx-fork
+```
 
 ## What works now
 

@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+source_dir="$project_dir/mixxx-fork"
+binary="$source_dir/build/mixxx"
+resource_dir="$source_dir/res"
+settings_dir="$source_dir/.local/settings"
+
+if [ ! -x "$binary" ]; then
+    echo "Mixxx fork is not built: $binary" >&2
+    echo "See docs/MIXXX_INTEGRATION.md for the local build command." >&2
+    exit 1
+fi
+
+mkdir -p "$settings_dir"
+
+exec "$binary" \
+    --settings-path "$settings_dir" \
+    --resource-path "$resource_dir" \
+    --developer \
+    "$@"
