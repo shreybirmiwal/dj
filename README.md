@@ -1,5 +1,9 @@
 # SetMix prototype
 
+> **Mixxx integration:** SetMix does not currently use Mixxx. A first
+> launch/playlist bridge and the proposed AI-sidecar architecture are documented
+> in [`docs/MIXXX_INTEGRATION.md`](docs/MIXXX_INTEGRATION.md).
+
 Before changing planner or transition behavior, read
 [`docs/HUMAN_FEEDBACK.md`](docs/HUMAN_FEEDBACK.md). It records listener
 preferences, failed and approved references, open acceptance criteria, and the

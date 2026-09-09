@@ -17,6 +17,7 @@ from .engine import (
     validate_render,
 )
 from .intelligence import analyze_intelligence
+from .mixxx import build_mixxx_command, launch_mixxx, write_mixxx_playlist
 from .preprocess import PREPARATION_LEVELS, prepare_library
 from .stems import analyze_vocals
 
@@ -138,6 +139,19 @@ def _parser() -> argparse.ArgumentParser:
     validate = sub.add_parser("validate", help="measure a rendered mix and its transitions")
     validate.add_argument("audio")
     validate.add_argument("--plan")
+
+    mixxx = sub.add_parser(
+        "mixxx",
+        help="open up to four tracks in Mixxx or export a Mixxx playlist",
+    )
+    mixxx.add_argument("tracks", nargs="+")
+    mixxx.add_argument("--mixxx-path", help="path to the Mixxx executable")
+    mixxx.add_argument("--settings-path", help="isolated Mixxx settings directory")
+    mixxx.add_argument("--resource-path", help="Mixxx resources or fork checkout")
+    mixxx.add_argument("--start-autodj", action="store_true")
+    mixxx.add_argument("--developer", action="store_true")
+    mixxx.add_argument("--playlist-output", help="also write the ordered set as M3U8")
+    mixxx.add_argument("--dry-run", action="store_true", help="print the launch command only")
     return parser
 
 
@@ -150,6 +164,34 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report["passed"] else 1
 
         tracks = discover_tracks(args.tracks)
+        if args.command == "mixxx":
+            playlist = None
+            if args.playlist_output:
+                playlist = write_mixxx_playlist(tracks, args.playlist_output)
+                _progress(f"Wrote {playlist}")
+            if len(tracks) > 4:
+                if playlist:
+                    print(json.dumps({"playlist": str(playlist), "launched": False}, indent=2))
+                    return 0
+                raise ValueError(
+                    "Mixxx can load at most four command-line tracks; add "
+                    "--playlist-output for a longer ordered set."
+                )
+            command = build_mixxx_command(
+                tracks,
+                executable=args.mixxx_path,
+                settings_path=args.settings_path,
+                resource_path=args.resource_path,
+                start_autodj=args.start_autodj,
+                developer=args.developer,
+            )
+            result: dict[str, object] = {"command": command, "playlist": str(playlist) if playlist else None}
+            if args.dry_run:
+                result["launched"] = False
+            else:
+                result.update({"launched": True, "pid": launch_mixxx(command)})
+            print(json.dumps(result, indent=2))
+            return 0
         if args.command == "prepare":
             report = prepare_library(
                 tracks,
