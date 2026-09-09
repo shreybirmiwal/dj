@@ -419,13 +419,17 @@ def _stretched_four_stems(
     track: TrackAnalysis,
     target_bpm: float,
     cache_dir: Path,
+    *,
+    workers: int = 4,
 ) -> dict[str, Path]:
     stems = separate_stems(track.path)
     ratio = target_bpm / track.bpm
-    return {
-        name: _stretched_audio_path(path, ratio, cache_dir)
-        for name, path in stems.items()
-    }
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(stems)))) as pool:
+        futures = {
+            name: pool.submit(_stretched_audio_path, path, ratio, cache_dir)
+            for name, path in stems.items()
+        }
+        return {name: future.result() for name, future in futures.items()}
 
 
 def _stretched_four_stem_segments(
@@ -434,13 +438,24 @@ def _stretched_four_stem_segments(
     start: float,
     duration: float,
     cache_dir: Path,
+    *,
+    workers: int = 4,
 ) -> dict[str, Path]:
     stems = separate_stems(track.path)
     ratio = target_bpm / track.bpm
-    return {
-        name: _stretched_audio_segment_path(path, ratio, start, duration, cache_dir)
-        for name, path in stems.items()
-    }
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(stems)))) as pool:
+        futures = {
+            name: pool.submit(
+                _stretched_audio_segment_path,
+                path,
+                ratio,
+                start,
+                duration,
+                cache_dir,
+            )
+            for name, path in stems.items()
+        }
+        return {name: future.result() for name, future in futures.items()}
 
 
 def _track_gain(track: TrackAnalysis, target_db: float = -15.0) -> float:
@@ -1423,20 +1438,25 @@ def render_pair_handoff(
     before_duration = transition.from_cue - start
     transition_frames = round(transition.duration * SAMPLE_RATE)
     post_roll_seconds = max(2.0, float(post_roll_seconds))
-    outgoing_path = _stretched_audio_segment_path(
-        Path(plan.tracks[0].path),
-        transition.tempo_ratio_from,
-        start,
-        before_duration + transition.duration,
-        cache_root / "tracks",
-    )
-    incoming_path = _stretched_audio_segment_path(
-        Path(plan.tracks[1].path),
-        transition.tempo_ratio_to,
-        transition.to_cue,
-        transition.duration + post_roll_seconds + 0.5,
-        cache_root / "tracks",
-    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outgoing_future = pool.submit(
+            _stretched_audio_segment_path,
+            Path(plan.tracks[0].path),
+            transition.tempo_ratio_from,
+            start,
+            before_duration + transition.duration,
+            cache_root / "tracks",
+        )
+        incoming_future = pool.submit(
+            _stretched_audio_segment_path,
+            Path(plan.tracks[1].path),
+            transition.tempo_ratio_to,
+            transition.to_cue,
+            transition.duration + post_roll_seconds + 0.5,
+            cache_root / "tracks",
+        )
+        outgoing_path = outgoing_future.result()
+        incoming_path = incoming_future.result()
     gains = [_track_gain(track) for track in plan.tracks]
 
     with tempfile.TemporaryDirectory(prefix="setmix-handoff-") as temp_dir:
@@ -1454,12 +1474,16 @@ def render_pair_handoff(
                 alignment_margin = 0.3
                 left_stem_start = max(0.0, transition.from_cue - alignment_margin)
                 right_stem_start = max(0.0, transition.to_cue - alignment_margin)
+                # Four independent stems benefit from parallel FFmpeg work, but
+                # running both source disks at once causes I/O contention on a
+                # DJ laptop. Finish one track before starting the other.
                 left_paths = _stretched_four_stem_segments(
                     plan.tracks[0],
                     plan.target_bpm,
                     left_stem_start,
                     transition.duration + 2 * alignment_margin,
                     cache_root / "stems4",
+                    workers=4,
                 )
                 right_paths = _stretched_four_stem_segments(
                     plan.tracks[1],
@@ -1467,6 +1491,7 @@ def render_pair_handoff(
                     right_stem_start,
                     transition.duration + post_roll_seconds + 2 * alignment_margin,
                     cache_root / "stems4",
+                    workers=4,
                 )
                 left_stems = {name: sf.SoundFile(path) for name, path in left_paths.items()}
                 right_stems = {name: sf.SoundFile(path) for name, path in right_paths.items()}

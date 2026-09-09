@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -72,6 +74,16 @@ def _four_stem_key(path: Path) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:24]
 
 
+def _cached_four_stems(source: Path, cache_root: Path) -> dict[str, Path] | None:
+    model_root = cache_root / _four_stem_key(source) / "htdemucs"
+    candidates = list(model_root.glob("*/vocals.flac"))
+    if not candidates:
+        return None
+    folder = candidates[0].parent
+    result = {name: folder / f"{name}.flac" for name in ("vocals", "drums", "bass", "other")}
+    return result if all(item.exists() for item in result.values()) else None
+
+
 def separate_stems(
     path: str | Path,
     *,
@@ -80,21 +92,15 @@ def separate_stems(
 ) -> dict[str, Path]:
     """Separate vocals, drums, bass, and other with cached Demucs output."""
     source = Path(path).expanduser().resolve()
-    root = Path(cache_dir) / _four_stem_key(source)
-    model_root = root / "htdemucs"
-    candidates = list(model_root.glob("*/vocals.flac"))
-    if candidates:
-        folder = candidates[0].parent
-        result = {name: folder / f"{name}.flac" for name in ("vocals", "drums", "bass", "other")}
-        if all(item.exists() for item in result.values()):
-            return result
+    cache_root = Path(cache_dir)
+    root = cache_root / _four_stem_key(source)
+    cached = _cached_four_stems(source, cache_root)
+    if cached:
+        return cached
     with STEM_CACHE_LOCK:
-        candidates = list(model_root.glob("*/vocals.flac"))
-        if candidates:
-            folder = candidates[0].parent
-            result = {name: folder / f"{name}.flac" for name in ("vocals", "drums", "bass", "other")}
-            if all(item.exists() for item in result.values()):
-                return result
+        cached = _cached_four_stems(source, cache_root)
+        if cached:
+            return cached
         root.mkdir(parents=True, exist_ok=True)
         command = [
             sys.executable,
@@ -118,14 +124,79 @@ def separate_stems(
             raise RuntimeError(
                 "Four-stem mixing requires the optional stem dependencies from requirements-stems.txt"
             ) from error
-    candidates = list(model_root.glob("*/vocals.flac"))
-    if not candidates:
+    result = _cached_four_stems(source, cache_root)
+    if not result:
         raise RuntimeError(f"Stem separation did not produce expected outputs for {source}")
-    folder = candidates[0].parent
-    result = {name: folder / f"{name}.flac" for name in ("vocals", "drums", "bass", "other")}
-    if not all(item.exists() for item in result.values()):
-        raise RuntimeError(f"Stem separation was incomplete for {source}")
     return result
+
+
+def separate_stems_batch(
+    paths: list[str | Path],
+    *,
+    cache_dir: str | Path = ".setmix-cache/stems4",
+    device: str = "auto",
+) -> list[dict[str, Path]]:
+    """Separate multiple uncached tracks with one Demucs model load.
+
+    Demucs processes the tracks in sequence internally, so this saves startup
+    and model-transfer time without multiplying GPU memory use.
+    """
+    sources = [Path(path).expanduser().resolve() for path in paths]
+    cache_root = Path(cache_dir)
+    results = [_cached_four_stems(source, cache_root) for source in sources]
+    missing = [source for source, result in zip(sources, results) if result is None]
+    if len(missing) < 2 or len({source.stem for source in missing}) != len(missing):
+        return [
+            result or separate_stems(source, cache_dir=cache_root, device=device)
+            for source, result in zip(sources, results)
+        ]
+
+    with STEM_CACHE_LOCK:
+        results = [_cached_four_stems(source, cache_root) for source in sources]
+        missing = [source for source, result in zip(sources, results) if result is None]
+        if len(missing) < 2 or len({source.stem for source in missing}) != len(missing):
+            return [
+                result or separate_stems(source, cache_dir=cache_root, device=device)
+                for source, result in zip(sources, results)
+            ]
+
+        cache_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".batch-", dir=cache_root) as temporary:
+            batch_root = Path(temporary)
+            command = [
+                sys.executable,
+                "-m",
+                "setmix.demucs_runner",
+                "--flac",
+                "--int24",
+                "--clip-mode",
+                "clamp",
+                "-n",
+                "htdemucs",
+                "-d",
+                _resolve_device(device),
+                "-o",
+                str(batch_root),
+                *(str(source) for source in missing),
+            ]
+            try:
+                subprocess.run(command, check=True)
+            except (subprocess.CalledProcessError, ModuleNotFoundError) as error:
+                raise RuntimeError(
+                    "Four-stem mixing requires the optional stem dependencies from requirements-stems.txt"
+                ) from error
+            for source in missing:
+                generated = batch_root / "htdemucs" / source.stem
+                if not (generated / "vocals.flac").exists():
+                    raise RuntimeError(f"Batch stem separation was incomplete for {source}")
+                target = cache_root / _four_stem_key(source) / "htdemucs" / source.stem
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(generated), str(target))
+
+    final = [_cached_four_stems(source, cache_root) for source in sources]
+    if any(result is None for result in final):
+        raise RuntimeError("Batch stem separation did not produce all expected outputs")
+    return [result for result in final if result is not None]
 
 
 def separate_vocals(

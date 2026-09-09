@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import threading
+import time
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
 
@@ -8,6 +12,7 @@ from setmix.engine import (
     MixPlan,
     Transition,
     _stretched_audio_segment_path,
+    _stretched_four_stem_segments,
     _drum_alignment_curve,
     _drum_alignment_transform,
     mix_four_stem_transition,
@@ -37,7 +42,6 @@ def test_interactive_stretch_only_decodes_requested_window(tmp_path, monkeypatch
         commands.append(command)
         Path(command[-1]).write_bytes(b"segment")
 
-    from pathlib import Path
     from setmix import engine
 
     monkeypatch.setattr(engine.subprocess, "run", fake_run)
@@ -48,6 +52,48 @@ def test_interactive_stretch_only_decodes_requested_window(tmp_path, monkeypatch
     assert len(commands) == 1
     assert commands[0][commands[0].index("-ss") + 1] == "31.500000000"
     assert commands[0][commands[0].index("-t") + 1] == "12.000000000"
+
+
+def test_stem_windows_are_stretched_in_parallel(tmp_path, monkeypatch) -> None:
+    from setmix import engine
+
+    sources = {name: tmp_path / f"{name}.flac" for name in ("vocals", "drums", "bass", "other")}
+    monkeypatch.setattr(engine, "separate_stems", lambda _path: sources)
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def fake_stretch(source, _ratio, _start, _duration, _cache):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return source
+
+    monkeypatch.setattr(engine, "_stretched_audio_segment_path", fake_stretch)
+    track = TrackAnalysis(
+        path=str(tmp_path / "track.mp3"),
+        duration=180.0,
+        bpm=120.0,
+        beat_times=[index * 0.5 for index in range(360)],
+        downbeat_offset=0,
+        cue_in=8.0,
+        cue_out=160.0,
+        active_end=175.0,
+        rms_db=-15.0,
+        beat_confidence=1.0,
+        transition_bars=32,
+    )
+
+    result = _stretched_four_stem_segments(
+        track, 124.0, 32.0, 64.0, tmp_path / "cache", workers=4
+    )
+
+    assert result == sources
+    assert maximum >= 2
 
 
 def test_pair_handoff_is_a_short_capsule(tmp_path, monkeypatch) -> None:

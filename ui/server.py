@@ -687,7 +687,7 @@ class MixManager:
                 analyze_intelligence,
                 analyze_sections,
             )
-            from setmix.stems import analyze_vocals
+            from setmix.stems import analyze_vocals, separate_stems_batch
 
             def analysis_progress(message: str) -> None:
                 self._update(
@@ -708,21 +708,29 @@ class MixManager:
                 job_id,
                 status="working",
                 stage="vocals",
-                message="Separating vocal and instrumental stems",
+                message="Separating both tracks in one neural stem session",
                 progress=28,
             )
-            vocal_maps = {analysis.path: analyze_vocals(analysis.path) for analysis in analyses}
+            separate_stems_batch([analysis.path for analysis in analyses])
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                vocal_futures = {
+                    analysis.path: pool.submit(analyze_vocals, analysis.path)
+                    for analysis in analyses
+                }
+                vocal_maps = {
+                    path: future.result() for path, future in vocal_futures.items()
+                }
             self._update(
                 job_id,
                 stage="intelligence",
                 message="Detecting sections and synchronized lyric boundaries",
                 progress=48,
             )
-            intelligence: dict[str, TrackIntelligence] = {}
             metadata_by_id = {
                 item["id"]: item for item in options.get("trackMetadata", [])
             }
-            for analysis, track_id in zip(analyses, (options["fromId"], options["toId"])):
+
+            def prepare_intelligence(analysis, track_id: str) -> TrackIntelligence:
                 metadata = metadata_by_id.get(track_id, {})
                 provider = fetch_lrclib_lyrics(Path(analysis.path), metadata)
                 if provider:
@@ -734,17 +742,27 @@ class MixManager:
                         phrases=[LyricPhrase(**item) for item in provider["phrases"]],
                         confidence=float(provider.get("confidence", 0.99)),
                     )
-                    intelligence[analysis.path] = TrackIntelligence(
+                    return TrackIntelligence(
                         path=analysis.path,
                         sections=analyze_sections(analysis, vocal_maps[analysis.path]),
                         transcript=transcript,
                     )
-                else:
-                    intelligence[analysis.path] = analyze_intelligence(
-                        analysis,
-                        vocal_maps[analysis.path],
-                        word_model=options["wordModel"],
-                    )
+                return analyze_intelligence(
+                    analysis,
+                    vocal_maps[analysis.path],
+                    word_model=options["wordModel"],
+                )
+
+            track_ids = (options["fromId"], options["toId"])
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                intelligence_futures = {
+                    analysis.path: pool.submit(prepare_intelligence, analysis, track_id)
+                    for analysis, track_id in zip(analyses, track_ids)
+                }
+                intelligence: dict[str, TrackIntelligence] = {
+                    path: future.result()
+                    for path, future in intelligence_futures.items()
+                }
             self._update(
                 job_id,
                 stage="planning",

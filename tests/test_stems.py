@@ -86,3 +86,28 @@ def test_new_four_stem_pass_is_lossless_flac(tmp_path, monkeypatch) -> None:
     assert "--flac" in commands[0]
     assert "--mp3" not in commands[0]
     assert commands[0][commands[0].index("--clip-mode") + 1] == "clamp"
+
+
+def test_two_tracks_share_one_demucs_model_load(tmp_path, monkeypatch) -> None:
+    sources = [tmp_path / "left.wav", tmp_path / "right.wav"]
+    for source in sources:
+        source.write_bytes(b"audio")
+    commands = []
+
+    def fake_run(command, check):
+        commands.append(command)
+        output_root = Path(command[command.index("-o") + 1]) / "htdemucs"
+        for source in sources:
+            output = output_root / source.stem
+            output.mkdir(parents=True)
+            for name in ("vocals", "drums", "bass", "other"):
+                (output / f"{name}.flac").write_bytes(name.encode())
+
+    monkeypatch.setattr(stem_module.subprocess, "run", fake_run)
+    first = stem_module.separate_stems_batch(sources, cache_dir=tmp_path / "stems4")
+    second = stem_module.separate_stems_batch(sources, cache_dir=tmp_path / "stems4")
+
+    assert len(commands) == 1
+    assert all(str(source) in commands[0] for source in sources)
+    assert first == second
+    assert all(all(path.exists() for path in result.values()) for result in first)
