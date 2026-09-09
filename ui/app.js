@@ -38,6 +38,7 @@ const state = {
   controller: { connected: false, native: false, name: null, messages: 0 },
   cue: { available: false, channel: null, level: 0.7, device: null },
   libraryView: "all",
+  libraryLimit: 72,
   deckOptions: { quantize: true, keyLock: true, slip: false, keySync: true, phraseSync: true },
 };
 
@@ -53,6 +54,8 @@ let audioGraph = null;
 let midiAccess = null;
 let midiOutput = null;
 let hardwareCheckTimer = null;
+let searchRenderTimer = null;
+let prefetchHandle = null;
 const automationGains = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
 const basePlaybackRates = new WeakMap([[audioPrimary, 1], [audioSecondary, 1]]);
 const jogResetTimers = new WeakMap();
@@ -570,9 +573,9 @@ function compatibilityScore(track) {
 }
 
 function renderRows() {
+  const query = state.search.trim().toLowerCase();
   const visible = tracks.filter((track) => {
     const inFilter = state.filter === "All" || track.genre === state.filter;
-    const query = state.search.toLowerCase();
     const analyzed = Boolean(track.bpm && track.camelot && track.length);
     const score = compatibilityScore(track);
     const inView = state.libraryView === "all"
@@ -581,9 +584,11 @@ function renderRows() {
       || (state.libraryView === "harmonic" && score >= 78)
       || (state.libraryView === "ready" && analyzed && track.cueIn != null && track.cueOut != null)
       || (state.libraryView === "pending" && !analyzed);
-    return inFilter && inView && `${track.title} ${track.artist} ${track.genre}`.toLowerCase().includes(query);
+    const searchText = track._searchText || `${track.title} ${track.artist} ${track.genre}`.toLowerCase();
+    return inFilter && inView && (!query || searchText.includes(query));
   });
-  $("#trackRows").innerHTML = visible.map((track, index) => `
+  const shown = visible.slice(0, state.libraryLimit);
+  $("#trackRows").innerHTML = shown.map((track, index) => `
     <tr data-id="${track.id}">
       <td><span class="track-number">${String(index + 1).padStart(2, "0")}</span></td>
       <td><div class="table-title-cell"><div class="cover cover-small cover-${track.cover}">${track.cover === 2 ? '<span class="moon"></span><span class="horizon"></span>' : ""}</div><span><strong>${track.title}</strong><small>${track.artist} · ${track.genre}</small></span></div></td>
@@ -594,6 +599,13 @@ function renderRows() {
       <td><button class="mix-next-button ${state.queued?.id === track.id ? "selected" : ""}" data-mix-id="${track.id}">${state.queued?.id === track.id ? "Queued ✓" : "Mix next"}</button></td>
     </tr>`).join("");
   $("#emptyState").hidden = visible.length > 0;
+  $("#libraryFooter").hidden = visible.length === 0;
+  $("#libraryCount").textContent = visible.length > shown.length
+    ? `SHOWING ${shown.length} OF ${visible.length} TRACKS`
+    : `${visible.length} TRACK${visible.length === 1 ? "" : "S"}`;
+  const loadMore = $("#loadMoreTracks");
+  loadMore.hidden = shown.length >= visible.length;
+  loadMore.textContent = `SHOW ${Math.min(72, visible.length - shown.length)} MORE`;
 }
 
 function setSuggestion(track) {
@@ -1559,11 +1571,21 @@ $("#filterRow").addEventListener("click", (event) => {
   const filter = event.target.closest("[data-filter]");
   if (!filter) return;
   state.filter = filter.dataset.filter;
+  state.libraryLimit = 72;
   document.querySelectorAll(".filter").forEach(button => button.classList.toggle("active", button === filter));
   renderRows();
 });
 
-$("#searchInput").addEventListener("input", (event) => { state.search = event.target.value; renderRows(); });
+$("#searchInput").addEventListener("input", (event) => {
+  state.search = event.target.value;
+  state.libraryLimit = 72;
+  clearTimeout(searchRenderTimer);
+  searchRenderTimer = setTimeout(renderRows, 90);
+});
+$("#loadMoreTracks").addEventListener("click", () => {
+  state.libraryLimit += 72;
+  renderRows();
+});
 $("#heartButton").addEventListener("click", (event) => event.currentTarget.classList.toggle("liked"));
 $("#playbackToggle").addEventListener("click", togglePlayback);
 $("#deckAPlay").addEventListener("click", togglePlayback);
@@ -1649,6 +1671,7 @@ $(".collection-tree").addEventListener("click", event => {
   const button = event.target.closest("[data-library-view]");
   if (!button) return;
   state.libraryView = button.dataset.libraryView;
+  state.libraryLimit = 72;
   document.querySelectorAll(".collection-tree [data-library-view]").forEach(item => item.classList.toggle("active", item === button));
   renderRows();
 });
@@ -1739,16 +1762,24 @@ function likelyNextTracks(current, excludedId = null, limit = 3) {
 
 function prefetchLikelyNext(current) {
   if (!current) return;
-  const candidates = likelyNextTracks(current, null, 3);
-  candidates.forEach(track => {
-    loadWaveform(track);
-    loadLyrics(track);
-  });
-  fetch("/api/prefetch", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fromId: current.id, trackIds: candidates.map(track => track.id) }),
-  }).catch(error => console.debug("prefetch unavailable", error));
+  // Speculate only on the strongest candidate. Full stem work begins after
+  // selection, keeping the realtime audio/UI threads responsive.
+  const candidates = likelyNextTracks(current, null, 1);
+  if (prefetchHandle != null) {
+    if (window.cancelIdleCallback) window.cancelIdleCallback(prefetchHandle);
+    else clearTimeout(prefetchHandle);
+  }
+  const run = () => {
+    prefetchHandle = null;
+    fetch("/api/prefetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fromId: current.id, trackIds: candidates.map(track => track.id) }),
+    }).catch(error => console.debug("prefetch unavailable", error));
+  };
+  prefetchHandle = window.requestIdleCallback
+    ? window.requestIdleCallback(run, { timeout: 2500 })
+    : setTimeout(run, 800);
 }
 
 function renderFilters() {
@@ -1776,8 +1807,12 @@ async function loadCatalog() {
     const catalog = await response.json();
     if (!catalog.tracks?.length) throw new Error("music folder contains no supported audio files");
     tracks = catalog.tracks;
+    tracks.forEach(track => {
+      track._searchText = `${track.title} ${track.artist} ${track.genre}`.toLowerCase();
+    });
     state.filter = "All";
     state.search = "";
+    state.libraryLimit = 72;
     state.queued = null;
     state.mixJob = null;
     state.preparedHandoff = null;

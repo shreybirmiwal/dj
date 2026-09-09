@@ -1,8 +1,36 @@
 import subprocess
 import json
 from pathlib import Path
+from threading import Thread
+from urllib.request import urlopen
 
 from ui import server
+
+
+def test_catalog_request_reuses_startup_scan(tmp_path: Path, monkeypatch):
+    source = tmp_path / "song.mp3"
+    source.write_bytes(b"audio")
+    calls = []
+    catalog = [{"id": "track-1", "title": "Song", "_path": source}]
+
+    def fake_catalog(_music_dir):
+        calls.append(True)
+        return catalog
+
+    monkeypatch.setattr(server, "build_catalog", fake_catalog)
+    httpd = server.create_server(tmp_path, 0)
+    thread = Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with urlopen(f"http://127.0.0.1:{httpd.server_port}/api/catalog") as response:
+            payload = json.load(response)
+        assert payload["tracks"] == [{"id": "track-1", "title": "Song"}]
+        assert calls == [True]
+        assert server.SetMixHandler.catalog_by_id["track-1"]["_path"] == source
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=1)
 
 
 def test_browser_media_keeps_supported_audio(tmp_path: Path):

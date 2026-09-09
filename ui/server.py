@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -828,13 +828,15 @@ class PrefetchManager:
     """Warm likely next-track caches without blocking the interactive request."""
 
     def __init__(self) -> None:
-        self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="setmix-prefetch")
+        # Keep speculative analysis from competing with realtime audio or a
+        # user-requested render. Selected mixes still use their dedicated pool.
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="setmix-prefetch")
         self.lock = threading.Lock()
         self.jobs: dict[str, str] = {}
 
     def create(self, tracks: list[dict]) -> dict:
         scheduled: list[str] = []
-        for index, track in enumerate(tracks[:3]):
+        for track in tracks[:3]:
             path = track["_path"]
             stat = path.stat()
             key = hashlib.sha256(
@@ -844,24 +846,18 @@ class PrefetchManager:
                 if self.jobs.get(key) in {"queued", "working", "ready"}:
                     continue
                 self.jobs[key] = "queued"
-            self.pool.submit(self._prepare, key, path, index == 0)
+            self.pool.submit(self._prepare, key, path)
             scheduled.append(track["id"])
         return {"status": "accepted", "scheduled": scheduled}
 
-    def _prepare(self, key: str, path: Path, warm_stems: bool) -> None:
+    def _prepare(self, key: str, path: Path) -> None:
         try:
             from setmix.analysis import analyze_track
-            from setmix.intelligence import analyze_intelligence
-            from setmix.stems import analyze_vocals
 
             with self.lock:
                 self.jobs[key] = "working"
-            analysis = analyze_track(path, transition_bars=32)
+            analyze_track(path, transition_bars=32)
             waveform_summary(path)
-            if warm_stems:
-                separate_stems(path)
-                vocals = analyze_vocals(path)
-                analyze_intelligence(analysis, vocals, transcribe=False)
             with self.lock:
                 self.jobs[key] = "ready"
         except Exception:
@@ -876,15 +872,22 @@ PREFETCH_MANAGER = PrefetchManager()
 
 class SetMixHandler(SimpleHTTPRequestHandler):
     catalog: list[dict] = []
+    catalog_by_id: dict[str, dict] = {}
     music_dir: Path
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
+    def _track(self, track_id: str) -> dict | None:
+        return self.catalog_by_id.get(track_id)
+
     def do_GET(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
         if route == "/api/catalog":
-            self.__class__.catalog = build_catalog(self.music_dir)
+            query = parse_qs(urlparse(self.path).query)
+            if query.get("refresh") == ["1"]:
+                self.__class__.catalog = build_catalog(self.music_dir)
+                self.__class__.catalog_by_id = {track["id"]: track for track in self.catalog}
             payload = {
                 "source": str(self.music_dir),
                 "count": len(self.catalog),
@@ -894,7 +897,7 @@ class SetMixHandler(SimpleHTTPRequestHandler):
             return
         if route.startswith("/api/waveforms/"):
             track_id = route.removeprefix("/api/waveforms/")
-            track = next((item for item in self.catalog if item["id"] == track_id), None)
+            track = self._track(track_id)
             if not track:
                 self.send_error(404, "Track not found")
                 return
@@ -905,7 +908,7 @@ class SetMixHandler(SimpleHTTPRequestHandler):
             return
         if route.startswith("/api/lyrics/"):
             track_id = route.removeprefix("/api/lyrics/")
-            track = next((item for item in self.catalog if item["id"] == track_id), None)
+            track = self._track(track_id)
             if not track:
                 self.send_error(404, "Track not found")
                 return
@@ -929,7 +932,7 @@ class SetMixHandler(SimpleHTTPRequestHandler):
             return
         if route.startswith("/media/"):
             track_id = route.removeprefix("/media/")
-            track = next((item for item in self.catalog if item["id"] == track_id), None)
+            track = self._track(track_id)
             if not track:
                 self.send_error(404, "Track not found")
                 return
@@ -947,7 +950,7 @@ class SetMixHandler(SimpleHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 ids = [str(value) for value in payload.get("trackIds", [])][:3]
-                candidates = [item for track_id in ids for item in self.catalog if item["id"] == track_id]
+                candidates = [self.catalog_by_id[track_id] for track_id in ids if track_id in self.catalog_by_id]
                 for track in candidates:
                     LYRICS_MANAGER.create(
                         track["id"],
@@ -962,7 +965,7 @@ class SetMixHandler(SimpleHTTPRequestHandler):
             return
         if route.startswith("/api/lyrics/"):
             track_id = route.removeprefix("/api/lyrics/")
-            track = next((item for item in self.catalog if item["id"] == track_id), None)
+            track = self._track(track_id)
             if not track:
                 self.send_error(404, "Track not found")
                 return
@@ -983,8 +986,8 @@ class SetMixHandler(SimpleHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
-            left = next(item for item in self.catalog if item["id"] == str(payload["fromId"]))
-            right = next(item for item in self.catalog if item["id"] == str(payload["toId"]))
+            left = self.catalog_by_id[str(payload["fromId"])]
+            right = self.catalog_by_id[str(payload["toId"])]
             if left["id"] == right["id"]:
                 raise ValueError("Choose a different next track")
             bars = int(payload.get("bars", 32))
@@ -1044,7 +1047,7 @@ class SetMixHandler(SimpleHTTPRequestHandler):
             return
         if route.startswith("/media/"):
             track_id = route.removeprefix("/media/")
-            track = next((item for item in self.catalog if item["id"] == track_id), None)
+            track = self._track(track_id)
             if not track:
                 self.send_error(404, "Track not found")
                 return
@@ -1107,6 +1110,7 @@ def create_server(music_dir: Path, port: int = 4173) -> ThreadingHTTPServer:
 
     SetMixHandler.music_dir = music_dir
     SetMixHandler.catalog = build_catalog(music_dir)
+    SetMixHandler.catalog_by_id = {track["id"]: track for track in SetMixHandler.catalog}
     return ThreadingHTTPServer(("127.0.0.1", port), SetMixHandler)
 
 
